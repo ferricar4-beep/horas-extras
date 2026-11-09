@@ -1,0 +1,6 @@
+{
+  "name": "Dashboard Horas Extras Ferricar",
+  "description": "Dashboard para la gestión y cálculo de horas extras de los auxiliares de Ferricar en Medellín, Colombia.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,55 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  /* Marca (Restaurados al precioso tema índigo/púrpura original) */
+  --color-brand-red: #5b53db;       /* color principal índigo */
+  --color-brand-red-hover: #4a42c4; /* hover del principal */
+  --color-brand-red-soft: #f4f5fd;  /* fondo suave índigo */
+  --color-graphite-950: #0f0c31;    /* azul oscuro muy profundo */
+  --color-graphite-900: #1a1554;    /* azul profundo original (cabeceras/pie) */
+  --color-graphite-850: #15114a;    /* variante azul profundo */
+  --color-graphite-800: #1e1a4f;    /* variante azul profundo */
+  --color-graphite-700: #312e81;    /* textos secundarios / enlaces */
+
+  /* Base */
+  --color-slate-bg: #f4f5fd;        /* fondo general suave original */
+  --color-slate-card: #ffffff;      /* tarjetas */
+
+  /* Semáforo funcional — OJO: el rojo de alerta es distinto al rojo de marca,
+     para no confundir "esto es la marca" con "esto es una alerta real" */
+  --color-signal-green: #158F63;
+  --color-signal-green-soft: #E5F6EF;
+  --color-signal-amber: #D69A1E;
+  --color-signal-amber-soft: #FBF1DD;
+  --color-signal-alert: #D9631E;     /* naranja quemado — exceso de horas / error, NO el rojo de marca */
+  --color-signal-alert-soft: #FCEBDF;
+
+  /* Turno nocturno */
+  --color-night-indigo: #35407A;
+  --color-night-indigo-soft: #EAECF6;
+}
+
+:root {
+  --glass-bg: rgba(34, 36, 42, 0.55);      /* fondo oscurecido detrás del modal, tono graphite-900 */
+  --glass-border: rgba(255, 255, 255, 0.15);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.25);
+}
+
+.glass-overlay {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.glass-panel {
+  background: rgba(255, 255, 255, 0.85);   /* el panel/modal en sí sigue siendo casi opaco, NO translúcido */
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  border-radius: 16px;
+}
+
