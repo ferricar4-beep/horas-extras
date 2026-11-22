@@ -53,3 +53,162 @@
   border-radius: 16px;
 }
 
+/* ============================================================================
+   ESTILOS ACOTADOS A LA PANTALLA DE LOGIN (.login-scope)
+   ============================================================================ */
+
+.login-scope {
+  --background: #0B1020;
+  --foreground: #F1F5FF;
+  --primary: #818CF8;
+  --primary-strong: #4F46E5;
+  --primary-foreground: #FFFFFF;
+  --muted-foreground: #A5AECB;
+  --border: rgba(241, 245, 255, 0.13);
+  --input: rgba(241, 245, 255, 0.15);
+  --glass: rgba(20, 26, 56, 0.68);
+  --glass-border: rgba(241, 245, 255, 0.16);
+  --success: oklch(0.82 0.16 160);
+  --destructive: oklch(0.65 0.2 25);
+  --shadow-glass: 0 28px 80px -24px rgba(5, 8, 20, 0.75), inset 0 1px 0 rgba(241, 245, 255, 0.08);
+  --shadow-glow: 0 14px 34px -12px rgba(99, 102, 241, 0.6);
+
+  font-family: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+.login-scope .font-login-mono {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.login-scope .lg-overlay {
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--background) 84%, transparent) 0%,
+      color-mix(in oklab, var(--background) 53%, transparent) 48%,
+      color-mix(in oklab, var(--background) 62%, transparent) 100%
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--background) 38%, transparent) 0%,
+      transparent 38%,
+      color-mix(in oklab, var(--background) 80%, transparent) 100%
+    );
+}
+
+.login-scope .glass-panel {
+  border: 1px solid var(--glass-border);
+  background: linear-gradient(
+    145deg,
+    color-mix(in oklab, var(--glass) 92%, transparent),
+    color-mix(in oklab, var(--glass) 64%, transparent)
+  );
+  box-shadow: var(--shadow-glass);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  border-radius: 28px;
+}
+
+.login-scope .glass-subtle {
+  border: 1px solid var(--glass-border);
+  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+  backdrop-filter: blur(18px) saturate(130%);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+}
+
+.login-scope .lg-field {
+  width: 100%;
+  height: 3rem;
+  border: 1px solid var(--input);
+  background: color-mix(in oklab, var(--foreground) 5%, transparent);
+  color: var(--foreground);
+  outline: none;
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.login-scope .lg-field::placeholder {
+  color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+}
+
+.login-scope .lg-field:hover {
+  border-color: color-mix(in oklab, var(--foreground) 24%, transparent);
+}
+
+.login-scope .lg-field:focus,
+.login-scope .lg-field:focus-visible {
+  border-color: color-mix(in oklab, var(--primary) 70%, transparent);
+  background: color-mix(in oklab, var(--primary) 8%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--primary) 16%, transparent);
+}
+
+.login-scope .lg-button {
+  border: 1px solid color-mix(in oklab, var(--foreground) 25%, transparent);
+  background: linear-gradient(135deg, #4F46E5, #6D5BF6);
+  color: var(--primary-foreground);
+  box-shadow: var(--shadow-glow), inset 0 1px 0 color-mix(in oklab, var(--foreground) 40%, transparent);
+  transition: filter 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+
+.login-scope .lg-button:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+
+.login-scope .lg-button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-glow), 0 0 0 4px color-mix(in oklab, var(--primary) 28%, transparent);
+}
+
+.login-scope .eye-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 65%, transparent);
+}
+
+@keyframes loginEnter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes loginFloat {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+.login-scope .animate-enter {
+  animation: loginEnter 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.login-scope .animate-enter-delay {
+  animation: loginEnter 700ms cubic-bezier(0.22, 1, 0.36, 1) 150ms both;
+}
+
+.login-scope .animate-float {
+  animation: loginFloat 7s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-scope .animate-enter,
+  .login-scope .animate-enter-delay,
+  .login-scope .animate-float,
+  .login-scope .animate-ping {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+  .login-scope .lg-button,
+  .login-scope .lg-field {
+    transition: none !important;
+  }
+}

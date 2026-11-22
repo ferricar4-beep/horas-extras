@@ -18,7 +18,13 @@ import {
   X,
   TrendingUp,
   Unlock,
-  CheckCircle2
+  CheckCircle2,
+  Truck,
+  Radio,
+  LockKeyhole,
+  Eye,
+  EyeOff,
+  ArrowRight
 } from 'lucide-react';
 
 import { Registro, AuxiliarStats, PeriodoFiltro, NavTab, CargoTipo, JustificacionDia } from './types';
@@ -397,6 +403,10 @@ export default function App() {
   const [matchingAuxiliares, setMatchingAuxiliares] = useState<string[]>([]);
   const [isWelcoming, setIsWelcoming] = useState<boolean>(false);
   const [welcomingUser, setWelcomingUser] = useState<{ role: 'admin' | 'auxiliar'; name: string } | null>(null);
+  const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [loginBgError, setLoginBgError] = useState<boolean>(false);
 
   const triggerLoginSuccess = (role: 'admin' | 'auxiliar', name: string) => {
     setIsWelcoming(true);
@@ -670,11 +680,17 @@ export default function App() {
     sincronizarDatos();
 
     const handleOnline = () => {
+      setIsBrowserOnline(true);
       sincronizarDatos();
     };
+    const handleOffline = () => {
+      setIsBrowserOnline(false);
+    };
     window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
     return () => {
       window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
     };
   }, []);
 
@@ -1555,129 +1571,365 @@ export default function App() {
 
   // Pantalla de Login (Portón de Acceso)
   if (userRole === null) {
+    const heroFeatures = [
+      'Registro de turno en segundos',
+      'Horas extras calculadas automáticamente',
+    ];
+
     return (
-      <div className="min-h-screen bg-slate-900 font-sans text-slate-100 flex items-center justify-center p-4 relative overflow-hidden">
-        <div className="absolute top-[-20%] left-[-20%] w-[60%] h-[60%] rounded-full bg-indigo-600/10 blur-[120px]" />
-        <div className="absolute bottom-[-20%] right-[-20%] w-[60%] h-[60%] rounded-full bg-indigo-500/10 blur-[120px]" />
+      <div
+        className="login-scope relative min-h-screen overflow-hidden flex flex-col justify-between"
+        style={{
+          background:
+            'radial-gradient(circle at 76% 24%, color-mix(in oklab, var(--primary-strong) 26%, var(--background)), var(--background) 72%)',
+        }}
+      >
+        {/* Capa (a): Fondo fotográfico nocturno con respaldo degradado azul marino */}
+        {!loginBgError && (
+          <img
+            src="/ferricar-logistics-blue.jpg"
+            alt=""
+            aria-hidden="true"
+            onError={() => setLoginBgError(true)}
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+        )}
 
-        <div className="w-full max-w-md relative z-10">
-          <motion.div
-            initial={{ opacity: 0, y: 15 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.35, ease: 'easeOut' }}
-            className="bg-slate-800/90 backdrop-blur-xl border border-slate-700/80 p-6 sm:p-8 rounded-2xl shadow-xl relative"
-          >
-            {/* Modal de colisión de PINs */}
-            {matchingAuxiliares && matchingAuxiliares.length > 1 && (
-              <div className="absolute inset-0 bg-slate-900/90 backdrop-blur-md rounded-2xl z-30 p-6 flex flex-col justify-center text-left">
-                <h4 className="font-display font-bold text-sm text-white mb-1">Coincidencia de PIN</h4>
-                <p className="text-xs text-slate-400 mb-4">Múltiples auxiliares comparten este PIN. Selecciona tu nombre:</p>
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                  {matchingAuxiliares.map(name => (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() => handleConfirmSelectAuxiliar(name)}
-                      className="w-full text-left bg-slate-800 hover:bg-indigo-600/30 text-slate-200 px-3 py-2.5 rounded-xl border border-slate-700 hover:border-indigo-500 text-xs font-semibold transition-all flex items-center justify-between cursor-pointer"
-                    >
-                      <span>{formatoNombreCapital(name)}</span>
-                      <span className="text-[10px] text-indigo-400 font-bold uppercase">Entrar →</span>
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMatchingAuxiliares([]);
-                    setInputPin('');
-                  }}
-                  className="mt-4 text-center text-xs text-slate-400 hover:text-white cursor-pointer"
-                >
-                  ← Probar otro PIN
-                </button>
-              </div>
-            )}
+        {/* Capa (b): Veladura direccional */}
+        <div className="lg-overlay absolute inset-0" aria-hidden="true" />
 
-            {/* Header del Login */}
-            <div className="text-center mb-6">
-              <div className="mx-auto w-14 h-14 bg-indigo-500/10 rounded-2xl border border-indigo-500/20 flex items-center justify-center mb-3">
-                <TrendingUp className="w-7 h-7 text-indigo-400" />
-              </div>
-              <h2 className="font-display font-bold text-xl tracking-tight text-white uppercase">
-                FERRICAR LOGÍSTICA
-              </h2>
-              <p className="text-xs text-indigo-400 font-semibold mt-0.5">
-                Control Operacional de Horas Extras
-              </p>
-            </div>
-
-            {/* Formulario de Login */}
-            <form onSubmit={handleLoginSubmit} className="space-y-4">
-              <div>
-                <div className="flex justify-between items-center mb-1.5">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Código PIN de Acceso
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setShowPin(!showPin)}
-                    className="text-[11px] font-bold text-indigo-400 hover:text-indigo-300 cursor-pointer"
-                  >
-                    {showPin ? 'Ocultar' : 'Mostrar'}
-                  </button>
-                </div>
-                
-                <div className="relative">
-                  <input
-                    type={showPin ? 'text' : 'password'}
-                    maxLength={10}
-                    placeholder="Ingresa tu PIN de 4 dígitos"
-                    value={inputPin}
-                    onChange={(e) => {
-                      setInputPin(e.target.value.replace(/\D/g, ''));
-                      if (loginError) setLoginError('');
-                    }}
-                    className="w-full h-11 bg-slate-900 border border-slate-700 text-sm text-white pl-10 pr-4 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 tracking-widest font-mono font-bold"
-                  />
-                  <Key className="w-4 h-4 text-slate-500 absolute left-3 top-3.5" />
-                </div>
-              </div>
-
-              {loginError && (
-                <div className="bg-rose-950/40 border border-rose-900/50 p-3 rounded-xl text-xs text-rose-200 flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-                  <span>{loginError}</span>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                className="w-full h-11 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center justify-center gap-2 uppercase tracking-wider"
-              >
-                <Unlock className="w-4 h-4" />
-                <span>Ingresar al Sistema</span>
-              </button>
-            </form>
-
-            <div className="mt-6 pt-4 border-t border-slate-700/60 text-[11px] text-slate-400 text-center leading-relaxed flex flex-col items-center gap-2.5">
-              <p>El sistema identificará automáticamente si eres Administrador o Auxiliar según tu PIN registrado.</p>
-              <button
-                type="button"
-                onClick={() => setIsPrivacyModalOpen(true)}
-                className="inline-flex items-center gap-1.5 text-[11px] text-indigo-400 hover:text-indigo-300 underline cursor-pointer transition-colors"
-              >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Políticas de Privacidad y Tratamiento de Datos (Habeas Data)</span>
-              </button>
-            </div>
-          </motion.div>
-        </div>
-
-        {/* Modal de Privacidad en Login */}
-        <PrivacyModal
-          isOpen={isPrivacyModalOpen}
-          onClose={() => setIsPrivacyModalOpen(false)}
+        {/* Capa (c): Dos halos de luz */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -bottom-32 -left-32 w-[460px] h-[460px] rounded-full blur-[120px]"
+          style={{ background: 'color-mix(in oklab, var(--primary) 10%, transparent)' }}
         />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -top-36 -right-28 w-[520px] h-[520px] rounded-full blur-[140px]"
+          style={{ background: 'color-mix(in oklab, var(--primary) 15%, transparent)' }}
+        />
+
+        {/* HEADER */}
+        <header className="relative z-10 w-full max-w-[1320px] mx-auto px-5 sm:px-8 h-20 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="glass-subtle w-11 h-11 rounded-xl flex items-center justify-center shrink-0">
+              <Truck className="w-5 h-5" style={{ color: 'var(--primary)' }} aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <div
+                className="text-sm font-extrabold tracking-[0.2em] leading-none"
+                style={{ color: 'var(--foreground)' }}
+              >
+                FERRICAR
+              </div>
+              <div
+                className="font-login-mono text-[8px] uppercase tracking-[0.22em] mt-1.5"
+                style={{ color: 'var(--muted-foreground)' }}
+              >
+                Logistics intelligence
+              </div>
+            </div>
+          </div>
+
+          <div
+            className="glass-subtle rounded-full px-3.5 py-1.5 flex items-center gap-2 shrink-0"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="relative flex h-2 w-2" aria-hidden="true">
+              {isBrowserOnline && (
+                <span
+                  className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+                  style={{ backgroundColor: 'var(--success)' }}
+                />
+              )}
+              <span
+                className="relative inline-flex rounded-full h-2 w-2"
+                style={{ backgroundColor: isBrowserOnline ? 'var(--success)' : 'var(--destructive)' }}
+              />
+            </span>
+            <span
+              className="font-login-mono text-[10px] uppercase tracking-[0.14em]"
+              style={{ color: 'var(--foreground)' }}
+            >
+              {isBrowserOnline ? 'Conectado' : 'Sin conexión'}
+            </span>
+          </div>
+        </header>
+
+        {/* MAIN */}
+        <main className="relative z-10 w-full max-w-[1320px] mx-auto px-5 sm:px-8 py-6 md:py-10 flex-1 flex items-center">
+          <div className="w-full grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(360px,420px)] gap-10 lg:gap-16 items-center">
+            {/* COLUMNA IZQUIERDA (Hero) */}
+            <section className="animate-enter min-w-0">
+              <div className="glass-subtle inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 mb-6">
+                <Radio className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--primary)' }} aria-hidden="true" />
+                <span
+                  className="font-login-mono text-[9px] uppercase tracking-[0.18em] font-medium"
+                  style={{ color: 'var(--primary)' }}
+                >
+                  CONTROL LOGÍSTICO INTELIGENTE
+                </span>
+              </div>
+
+              <h1
+                className="font-extrabold tracking-[-0.055em] leading-[1.02] mb-5"
+                style={{
+                  fontSize: 'clamp(2.65rem, 5.4vw, 4.7rem)',
+                  color: 'var(--foreground)',
+                }}
+              >
+                <span className="block">Tu jornada,</span>
+                <span className="block">siempre</span>
+                <span className="block" style={{ color: 'var(--primary)' }}>
+                  al día.
+                </span>
+              </h1>
+
+              <p
+                className="max-w-md text-sm sm:text-base leading-relaxed mb-8"
+                style={{ color: 'var(--muted-foreground)' }}
+              >
+                Registra tu turno en segundos y consulta tus horas de la quincena.
+              </p>
+
+              <div className="animate-float flex flex-col items-start gap-2.5 max-w-sm">
+                {heroFeatures.map((label) => (
+                  <div
+                    key={label}
+                    className="glass-subtle rounded-xl px-3.5 py-2.5 flex items-center gap-2.5 text-xs sm:text-sm font-medium"
+                    style={{ color: 'var(--foreground)' }}
+                  >
+                    <CheckCircle2
+                      className="w-4 h-4 shrink-0"
+                      style={{ color: 'var(--success)' }}
+                      aria-hidden="true"
+                    />
+                    <span>{label}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* COLUMNA DERECHA (Tarjeta de acceso) */}
+            <section className="animate-enter-delay w-full max-w-[420px] mx-auto relative">
+              {/* Halo detrás de la tarjeta */}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -inset-5 rounded-[36px]"
+                style={{
+                  border: '1px solid color-mix(in oklab, var(--glass-border) 40%, transparent)',
+                  backgroundColor: 'color-mix(in oklab, var(--foreground) 5%, transparent)',
+                }}
+              />
+
+              <div className="glass-panel relative rounded-[28px] p-6 sm:p-7 overflow-hidden">
+                {/* Línea de luz superior */}
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-x-10 top-0 h-px"
+                  style={{
+                    background:
+                      'linear-gradient(90deg, transparent, color-mix(in oklab, var(--primary) 60%, transparent), transparent)',
+                  }}
+                />
+
+                {/* Modal de colisión de PINs con estética glass */}
+                {matchingAuxiliares && matchingAuxiliares.length > 1 && (
+                  <div
+                    className="absolute inset-0 z-30 p-6 sm:p-7 flex flex-col justify-center text-left rounded-[28px]"
+                    style={{
+                      background: 'color-mix(in oklab, var(--background) 88%, transparent)',
+                      backdropFilter: 'blur(24px) saturate(140%)',
+                      WebkitBackdropFilter: 'blur(24px) saturate(140%)',
+                    }}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span
+                        className="font-login-mono text-[10px] uppercase tracking-[0.18em]"
+                        style={{ color: 'var(--primary)' }}
+                      >
+                        PIN COMPARTIDO
+                      </span>
+                      <ShieldCheck className="w-4 h-4" style={{ color: 'var(--primary)' }} aria-hidden="true" />
+                    </div>
+                    <h4
+                      className="text-lg font-bold tracking-[-0.03em] mb-1"
+                      style={{ color: 'var(--foreground)' }}
+                    >
+                      Coincidencia de PIN
+                    </h4>
+                    <p className="text-xs mb-4" style={{ color: 'var(--muted-foreground)' }}>
+                      Múltiples auxiliares comparten este PIN. Selecciona tu nombre:
+                    </p>
+                    <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                      {matchingAuxiliares.map((name) => (
+                        <button
+                          key={name}
+                          type="button"
+                          onClick={() => handleConfirmSelectAuxiliar(name)}
+                          className="glass-subtle w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2"
+                          style={{
+                            color: 'var(--foreground)',
+                            '--tw-ring-color': 'var(--primary)',
+                          } as React.CSSProperties}
+                        >
+                          <span className="truncate">{formatoNombreCapital(name)}</span>
+                          <span
+                            className="font-login-mono text-[10px] uppercase tracking-wider shrink-0"
+                            style={{ color: 'var(--primary)' }}
+                          >
+                            Entrar →
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMatchingAuxiliares([]);
+                        setInputPin('');
+                      }}
+                      className="mt-4 text-center text-xs cursor-pointer transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:underline"
+                      style={{ color: 'var(--muted-foreground)' }}
+                    >
+                      ← Probar otro PIN
+                    </button>
+                  </div>
+                )}
+
+                {/* Cabecera de la tarjeta */}
+                <div className="flex items-center justify-between mb-3">
+                  <span
+                    className="font-login-mono text-[10px] uppercase tracking-[0.2em] font-medium"
+                    style={{ color: 'var(--primary)' }}
+                  >
+                    ACCESO SEGURO
+                  </span>
+                  <ShieldCheck className="w-4 h-4" style={{ color: 'var(--primary)' }} aria-hidden="true" />
+                </div>
+
+                <h2
+                  className="text-[28px] font-bold tracking-[-0.04em] leading-tight mb-1.5"
+                  style={{ color: 'var(--foreground)' }}
+                >
+                  Bienvenido de nuevo
+                </h2>
+                <p className="text-sm mb-6" style={{ color: 'var(--muted-foreground)' }}>
+                  Ingresa tu PIN para continuar.
+                </p>
+
+                {/* Formulario (solo PIN de 4 dígitos) */}
+                <form onSubmit={handleLoginSubmit} className="space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label
+                        htmlFor="login-pin-input"
+                        className="text-xs font-semibold"
+                        style={{ color: 'var(--foreground)' }}
+                      >
+                        PIN de acceso
+                      </label>
+                      <span
+                        className="font-login-mono text-[10px] uppercase tracking-[0.16em]"
+                        style={{ color: 'var(--muted-foreground)' }}
+                      >
+                        4 DÍGITOS
+                      </span>
+                    </div>
+
+                    <div className="relative">
+                      <LockKeyhole
+                        className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                        style={{ color: 'var(--muted-foreground)' }}
+                        aria-hidden="true"
+                      />
+                      <input
+                        id="login-pin-input"
+                        type={showPin ? 'text' : 'password'}
+                        inputMode="numeric"
+                        maxLength={4}
+                        autoComplete="one-time-code"
+                        placeholder="••••"
+                        value={inputPin}
+                        onChange={(e) => {
+                          setInputPin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                          if (loginError) setLoginError('');
+                        }}
+                        className="lg-field rounded-xl pl-11 pr-11 text-center font-login-mono tracking-[0.55em] text-base font-semibold"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPin(!showPin)}
+                        aria-label={showPin ? 'Ocultar PIN' : 'Mostrar PIN'}
+                        className="eye-toggle absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 rounded-lg cursor-pointer transition-opacity hover:opacity-90"
+                        style={{ color: 'var(--muted-foreground)' }}
+                      >
+                        {showPin ? (
+                          <EyeOff className="w-4 h-4" aria-hidden="true" />
+                        ) : (
+                          <Eye className="w-4 h-4" aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {loginError && (
+                    <div
+                      role="alert"
+                      className="p-3 rounded-xl text-xs flex items-center gap-2"
+                      style={{
+                        color: 'var(--destructive)',
+                        backgroundColor: 'color-mix(in oklab, var(--destructive) 12%, transparent)',
+                        border: '1px solid color-mix(in oklab, var(--destructive) 32%, transparent)',
+                      }}
+                    >
+                      <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      <span>{loginError}</span>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="lg-button group h-12 w-full rounded-xl font-semibold text-sm flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <span>Entrar a la plataforma</span>
+                    <ArrowRight
+                      className="w-4 h-4 transition-transform duration-150 group-hover:translate-x-1"
+                      aria-hidden="true"
+                    />
+                  </button>
+                </form>
+
+                <p className="text-xs text-center mt-5" style={{ color: 'var(--muted-foreground)' }}>
+                  ¿Olvidaste tu PIN? Contacta al coordinador
+                </p>
+
+                <div
+                  className="mt-5 pt-4 flex items-center justify-center gap-2 text-xs"
+                  style={{
+                    borderTop: '1px solid var(--border)',
+                    color: 'var(--muted-foreground)',
+                  }}
+                >
+                  <LockKeyhole className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Acceso personal con tu PIN</span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </main>
+
+        {/* FOOTER */}
+        <footer
+          className="relative z-10 w-full max-w-[1320px] mx-auto px-5 sm:px-8 py-5 flex items-center justify-between gap-4 font-login-mono text-[8px] uppercase tracking-[0.18em]"
+          style={{ color: 'var(--muted-foreground)' }}
+        >
+          <span>© 2026 Ferricar</span>
+          <span className="hidden sm:inline">Precisión en cada movimiento</span>
+          <span>V 2.0.4</span>
+        </footer>
       </div>
     );
   }
