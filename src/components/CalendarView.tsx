@@ -112,6 +112,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     return registros.filter(reg => {
       if (normalizarNombre(reg.auxiliar) !== normalizarNombre(selectedAux)) return false;
       const regDate = parseFecha(reg.fecha);
+      if (!regDate) return false;
       return (
         regDate.getFullYear() === currentYear &&
         regDate.getMonth() === currentMonth
@@ -124,7 +125,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     const mapa: { [dia: number]: Registro } = {};
     registrosMensuales.forEach(reg => {
       const regDate = parseFecha(reg.fecha);
-      mapa[regDate.getDate()] = reg;
+      if (regDate) {
+        mapa[regDate.getDate()] = reg;
+      }
     });
     return mapa;
   }, [registrosMensuales]);
@@ -180,7 +183,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     let jornadaTotal = 0;
 
     const registrosFiltradosPorQuincena = registrosMensuales.filter(reg => {
-      const d = parseFecha(reg.fecha).getDate();
+      const regDate = parseFecha(reg.fecha);
+      if (!regDate) return false;
+      const d = regDate.getDate();
       if (filtroQuincenaCalendario === 'q1') return d >= 1 && d <= 15;
       if (filtroQuincenaCalendario === 'q2') return d >= 16;
       return true;

@@ -1,3 +1,5 @@
+import type { JustificacionDia, TipoJustificacion } from './types';
+
 const SUPABASE_URL = 'https://tgouvfrpdgivtwmantby.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnb3V2ZnJwZGdpdnR3bWFudGJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyOTc4ODEsImV4cCI6MjA5ODg3Mzg4MX0.mbz7DDXbyVZ3A8KpIRZBm8GvkRTFegd-RiPyXb_XHtM';
 
@@ -36,7 +38,10 @@ export async function obtenerRegistros(auxiliar?: string): Promise<RegistroSupab
       let url = `${SUPABASE_URL}/rest/v1/registros?select=*&order=created_at.desc&limit=${pageSize}&offset=${offset}`;
       if (auxiliar) url += `&auxiliar=eq.${encodeURIComponent(auxiliar)}`;
       const res = await fetch(url, { headers });
-      if (!res.ok) throw new Error(`Supabase error: ${res.status}`);
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        throw new Error(`Supabase error ${res.status}${errBody ? `: ${errBody}` : ''}`);
+      }
       const data: RegistroSupabase[] = await res.json();
       if (!Array.isArray(data) || data.length === 0) {
         hasMore = false;
@@ -52,7 +57,7 @@ export async function obtenerRegistros(auxiliar?: string): Promise<RegistroSupab
     return allRecords;
   } catch (e) {
     console.error('[Supabase] Error al obtener registros:', e);
-    return [];
+    throw e instanceof Error ? e : new Error('Error al obtener registros desde Supabase');
   }
 }
 
@@ -90,7 +95,11 @@ export async function eliminarRegistro(id: string): Promise<boolean> {
       `${SUPABASE_URL}/rest/v1/registros?id=eq.${id}&origen=eq.manual`,
       { method: 'DELETE', headers }
     );
-    return res.ok;
+    if (!res.ok) {
+      console.error(`[Supabase] Error HTTP ${res.status} al eliminar registro ${id}`);
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error('[Supabase] Error al eliminar:', e);
     return false;
@@ -107,7 +116,11 @@ export async function actualizarRegistro(id: string, reg: Partial<RegistroSupaba
         body: JSON.stringify(reg),
       }
     );
-    return res.ok;
+    if (!res.ok) {
+      console.error(`[Supabase] Error HTTP ${res.status} al actualizar registro ${id}`);
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error('[Supabase] Error al actualizar:', e);
     return false;
@@ -121,7 +134,11 @@ export async function eliminarRegistrosDeAuxiliar(auxiliar: string): Promise<boo
       `${SUPABASE_URL}/rest/v1/registros?auxiliar=eq.${encodeURIComponent(cleanAux)}`,
       { method: 'DELETE', headers }
     );
-    return res.ok;
+    if (!res.ok) {
+      console.error(`[Supabase] Error HTTP ${res.status} al eliminar registros de auxiliar ${cleanAux}`);
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error('[Supabase] Error al eliminar registros de auxiliar:', e);
     return false;
@@ -143,6 +160,7 @@ export async function verificarConexion(): Promise<boolean> {
 export interface CredencialSupabase {
   auxiliar: string;
   pin: string;
+  cargo?: string | null;
   created_at?: string;
 }
 
@@ -152,54 +170,75 @@ export async function obtenerCredenciales(): Promise<CredencialSupabase[]> {
       `${SUPABASE_URL}/rest/v1/auxiliares_credenciales?select=*`,
       { headers }
     );
-    if (!res.ok) throw new Error(`Supabase error: ${res.status}`);
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`Supabase error ${res.status}${errBody ? `: ${errBody}` : ''}`);
+    }
     return await res.json();
   } catch (e) {
     console.error('[Supabase] Error al obtener credenciales:', e);
-    return [];
+    throw e instanceof Error ? e : new Error('Error al obtener credenciales desde Supabase');
   }
 }
 
-export async function guardarCredencial(auxiliar: string, pin: string): Promise<boolean> {
+export async function guardarCredencial(
+  auxiliar: string,
+  pin?: string,
+  cargo?: string
+): Promise<boolean> {
   try {
     const cleanAuxiliar = auxiliar.trim().toUpperCase();
-    const cleanPin = pin.trim();
+    const patchBody: Record<string, string> = {};
+    if (pin !== undefined) patchBody.pin = pin.trim();
+    if (cargo !== undefined) patchBody.cargo = cargo.trim();
 
-    // Intentar actualizar primero usando PATCH con Prefer: return=representation
+    if (Object.keys(patchBody).length === 0) return true;
+
     const patchRes = await fetch(
       `${SUPABASE_URL}/rest/v1/auxiliares_credenciales?auxiliar=eq.${encodeURIComponent(cleanAuxiliar)}`,
       {
         method: 'PATCH',
         headers: { ...headers, 'Prefer': 'return=representation' },
-        body: JSON.stringify({ pin: cleanPin }),
+        body: JSON.stringify(patchBody),
       }
     );
 
-    if (patchRes.ok) {
-      const updatedData = await patchRes.json();
-      if (Array.isArray(updatedData) && updatedData.length > 0) {
-        // Se actualizó con éxito un registro existente
-        return true;
-      }
+    if (!patchRes.ok) {
+      const errorMsg = await patchRes.text().catch(() => '');
+      console.error(`[Supabase] Error HTTP ${patchRes.status} al actualizar credencial:`, errorMsg);
+      return false;
     }
 
-    // Si no se actualizó ningún registro (o falló pero con un 200/204 vacío), intentamos insertarlo con POST
+    const updatedData = await patchRes.json();
+    if (Array.isArray(updatedData) && updatedData.length > 0) {
+      return true;
+    }
+
+    // No existía fila previa: insertar con POST
+    const postBody: Record<string, string> = {
+      auxiliar: cleanAuxiliar,
+      pin: pin !== undefined ? pin.trim() : '1234',
+    };
+    if (cargo !== undefined) {
+      postBody.cargo = cargo.trim();
+    }
+
     const postRes = await fetch(
       `${SUPABASE_URL}/rest/v1/auxiliares_credenciales`,
       {
         method: 'POST',
         headers: { ...headers, 'Prefer': 'return=representation' },
-        body: JSON.stringify({ auxiliar: cleanAuxiliar, pin: cleanPin }),
+        body: JSON.stringify(postBody),
       }
     );
 
-    if (postRes.ok) {
-      return true;
-    } else {
-      const errorMsg = await postRes.text();
-      console.warn('[Supabase] Error al insertar credencial (posible RLS):', errorMsg);
+    if (!postRes.ok) {
+      const errorMsg = await postRes.text().catch(() => '');
+      console.error(`[Supabase] Error HTTP ${postRes.status} al insertar credencial:`, errorMsg);
       return false;
     }
+
+    return true;
   } catch (e) {
     console.error('[Supabase] Error de red al guardar credencial:', e);
     return false;
@@ -213,10 +252,193 @@ export async function eliminarCredencial(auxiliar: string): Promise<boolean> {
       `${SUPABASE_URL}/rest/v1/auxiliares_credenciales?auxiliar=eq.${encodeURIComponent(cleanAux)}`,
       { method: 'DELETE', headers }
     );
-    return res.ok;
+    if (!res.ok) {
+      console.error(`[Supabase] Error HTTP ${res.status} al eliminar credencial de ${cleanAux}`);
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error('[Supabase] Error al eliminar credencial:', e);
     return false;
   }
 }
 
+// ============================================================================
+// JUSTIFICACIONES DE DÍAS (tabla: auxiliares_justificaciones)
+// ============================================================================
+
+export interface JustificacionSupabase {
+  id?: string;
+  auxiliar: string;
+  fecha: string;
+  tipo: TipoJustificacion | string;
+  nota?: string | null;
+  detalle?: Record<string, any> | null;
+  created_at?: string;
+}
+
+export async function obtenerJustificaciones(): Promise<JustificacionSupabase[]> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/auxiliares_justificaciones?select=*`,
+      { headers }
+    );
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`Supabase error ${res.status}${errBody ? `: ${errBody}` : ''}`);
+    }
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error('[Supabase] Error al obtener justificaciones:', e);
+    throw e instanceof Error ? e : new Error('Error al obtener justificaciones desde Supabase');
+  }
+}
+
+export async function guardarJustificacion(justificacion: JustificacionDia): Promise<JustificacionSupabase | null> {
+  try {
+    const { auxiliar, fecha, tipo, nota, ...extraFields } = justificacion;
+    const cleanAux = auxiliar.replace(/\s+/g, ' ').trim().toUpperCase();
+    const cleanFecha = fecha.trim();
+
+    const detallePayload: Record<string, any> = {
+      ...extraFields,
+      fechaCreacion: extraFields.fechaCreacion || new Date().toISOString(),
+    };
+    if (detallePayload.id === undefined) {
+      delete detallePayload.id;
+    }
+
+    const body = {
+      auxiliar: cleanAux,
+      fecha: cleanFecha,
+      tipo,
+      nota: nota ?? null,
+      detalle: detallePayload,
+    };
+
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/auxiliares_justificaciones?on_conflict=auxiliar,fecha`,
+      {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Prefer': 'resolution=merge-duplicates,return=representation',
+        },
+        body: JSON.stringify(body),
+      }
+    );
+
+    if (!res.ok) {
+      const errorMsg = await res.text().catch(() => '');
+      console.error(`[Supabase] Error HTTP ${res.status} al guardar justificación:`, errorMsg);
+      return null;
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) ? data[0] : data;
+  } catch (e) {
+    console.error('[Supabase] Error de red al guardar justificación:', e);
+    return null;
+  }
+}
+
+export async function eliminarJustificacion(auxiliar: string, fecha: string): Promise<boolean> {
+  try {
+    const cleanAux = auxiliar.replace(/\s+/g, ' ').trim().toUpperCase();
+    const cleanFecha = fecha.trim();
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/auxiliares_justificaciones?auxiliar=eq.${encodeURIComponent(cleanAux)}&fecha=eq.${encodeURIComponent(cleanFecha)}`,
+      { method: 'DELETE', headers }
+    );
+    if (!res.ok) {
+      console.error(`[Supabase] Error HTTP ${res.status} al eliminar justificación`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('[Supabase] Error al eliminar justificación:', e);
+    return false;
+  }
+}
+
+export async function eliminarJustificacionesDeAuxiliar(auxiliar: string): Promise<boolean> {
+  try {
+    const cleanAux = auxiliar.replace(/\s+/g, ' ').trim().toUpperCase();
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/auxiliares_justificaciones?auxiliar=eq.${encodeURIComponent(cleanAux)}`,
+      { method: 'DELETE', headers }
+    );
+    if (!res.ok) {
+      console.error(`[Supabase] Error HTTP ${res.status} al eliminar justificaciones de ${cleanAux}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('[Supabase] Error al eliminar justificaciones de auxiliar:', e);
+    return false;
+  }
+}
+
+// ============================================================================
+// CONFIGURACIÓN DE LA APLICACIÓN (tabla: app_config)
+// ============================================================================
+
+export async function obtenerAppConfig(): Promise<Record<string, string>> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/app_config?select=*`,
+      { headers }
+    );
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`Supabase error ${res.status}${errBody ? `: ${errBody}` : ''}`);
+    }
+    const rows: { clave: string; valor: string }[] = await res.json();
+    const map: Record<string, string> = {};
+    if (Array.isArray(rows)) {
+      rows.forEach(row => {
+        if (row && row.clave) {
+          map[row.clave] = row.valor ?? '';
+        }
+      });
+    }
+    return map;
+  } catch (e) {
+    console.error('[Supabase] Error al obtener app_config:', e);
+    throw e instanceof Error ? e : new Error('Error al obtener configuración desde Supabase');
+  }
+}
+
+export async function guardarAppConfig(entries: Record<string, string>): Promise<boolean> {
+  try {
+    const payload = Object.entries(entries).map(([clave, valor]) => ({
+      clave,
+      valor: String(valor ?? ''),
+    }));
+    if (payload.length === 0) return true;
+
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/app_config?on_conflict=clave`,
+      {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Prefer': 'resolution=merge-duplicates,return=representation',
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    if (!res.ok) {
+      const errorMsg = await res.text().catch(() => '');
+      console.error(`[Supabase] Error HTTP ${res.status} al guardar app_config:`, errorMsg);
+      return false;
+    }
+
+    return true;
+  } catch (e) {
+    console.error('[Supabase] Error de red al guardar app_config:', e);
+    return false;
+  }
+}

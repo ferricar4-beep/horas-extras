@@ -4,6 +4,11 @@
  */
 
 import { Registro, TipoJustificacion, JustificacionDia } from './types';
+import {
+  obtenerJustificaciones,
+  guardarJustificacion as guardarJustificacionSupa,
+  eliminarJustificacion as eliminarJustificacionSupa,
+} from './supabase';
 
 // Memoria de respaldo en caso de que localStorage esté bloqueado por políticas de iframe o cookies de terceros
 const memoryStorage: Record<string, string> = {};
@@ -147,10 +152,13 @@ export function esTurnoNocturno(ingStr: string, salStr: string): boolean {
 }
 
 /**
- * Calcula las horas extras basadas en una jornada estándar de 7 horas.
+ * Calcula las horas extras basadas en la jornada base configurada (por defecto 7 horas).
  */
 export function calcularHorasExtra(jornada: number): number {
-  return Math.max(0, Math.round((jornada - 7) * 10) / 10);
+  const rawBase = safeLocalStorage.getItem('ferricar_jornada_base');
+  const parsedBase = rawBase !== null ? Number(rawBase) : NaN;
+  const jornadaBase = Number.isFinite(parsedBase) && parsedBase > 0 ? parsedBase : 7;
+  return Math.max(0, Math.round((jornada - jornadaBase) * 10) / 10);
 }
 
 /**
@@ -196,26 +204,65 @@ export function obtenerNombreCorto(nombre: string): string {
 }
 
 /**
- * Convierte la fecha del formato "D/MM/YYYY" o similar, soportando años mal digitados como "0026".
+ * Convierte fechas en formato "D/M/AAAA" o "AAAA-MM-DD" (con o sin hora) a Date.
+ * Devuelve null si la fecha es vacía o inválida.
  */
-export function parseFecha(fechaStr: string): Date {
-  if (!fechaStr) return new Date();
-  const parts = fechaStr.trim().split('/');
-  if (parts.length < 3) return new Date();
-  
-  const day = parseInt(parts[0], 10);
-  const month = parseInt(parts[1], 10) - 1; // 0-indexed
-  let year = parseInt(parts[2], 10);
-  
-  // Normalizar año mal digitado como "0026" o "26" a 2026
-  if (year < 100) {
-    year = 2000 + year;
+export function parseFecha(fechaStr: string): Date | null {
+  if (!fechaStr || typeof fechaStr !== 'string') return null;
+  const trimmed = fechaStr.trim();
+  if (!trimmed) return null;
+
+  let day: number;
+  let month: number; // 0-indexed
+  let year: number;
+
+  const isoMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s].*)?$/.exec(trimmed);
+  if (isoMatch) {
+    year = parseInt(isoMatch[1], 10);
+    month = parseInt(isoMatch[2], 10) - 1;
+    day = parseInt(isoMatch[3], 10);
+  } else {
+    const datePart = trimmed.split(/\s+/)[0];
+    const parts = datePart.split('/');
+    if (parts.length !== 3 || parts.some(p => !/^\d+$/.test(p))) {
+      return null;
+    }
+
+    day = parseInt(parts[0], 10);
+    month = parseInt(parts[1], 10) - 1; // 0-indexed
+    year = parseInt(parts[2], 10);
+
+    // Normalizar año mal digitado como "0026" o "26" a 2026
+    if (year < 100) {
+      year = 2000 + year;
+    } else if (year > 100 && year < 2000) {
+      year = 2000 + (year % 100);
+    }
   }
-  if (year > 100 && year < 2000) {
-    year = 2000 + (year % 100);
+
+  if (
+    !Number.isFinite(year) ||
+    !Number.isFinite(month) ||
+    !Number.isFinite(day) ||
+    month < 0 ||
+    month > 11 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return null;
   }
-  
-  return new Date(year, month, day);
+
+  const parsed = new Date(year, month, day);
+  if (
+    isNaN(parsed.getTime()) ||
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return parsed;
 }
 
 
@@ -248,56 +295,82 @@ export function getSemanaAno(date: Date): { numero: number; etiqueta: string } {
  * Fecha actual de referencia: 2026-07-04 (Julio 2026, según metadatos).
  */
 /**
- * Detecta si una fecha es un día festivo oficial en Colombia (Año 2026 completo y festivos fijos).
+ * Calcula el Domingo de Pascua para un año dado (Algoritmo de Meeus/Jones/Butcher).
+ */
+function calcularPascua(year: number): Date {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31); // 3 = Marzo, 4 = Abril
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function sumarDias(date: Date, days: number): Date {
+  const res = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  res.setDate(res.getDate() + days);
+  return res;
+}
+
+/**
+ * Traslada una fecha al lunes siguiente si no cae en lunes (Ley Emiliani - Ley 51 de 1983).
+ */
+function trasladarALunes(date: Date): Date {
+  const dow = date.getDay();
+  if (dow === 1) return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const offset = dow === 0 ? 1 : 8 - dow;
+  return sumarDias(date, offset);
+}
+
+/**
+ * Detecta si una fecha es un día festivo oficial en Colombia para cualquier año.
  */
 export function esFestivoColombia(date: Date): boolean {
   const year = date.getFullYear();
   const month = date.getMonth(); // 0-indexed
   const day = date.getDate();
 
-  // Festivos fijos en Colombia (aplica para cualquier año)
-  // 1 de Enero: Año Nuevo
-  if (month === 0 && day === 1) return true;
-  // 1 de Mayo: Día del Trabajo
-  if (month === 4 && day === 1) return true;
-  // 20 de Julio: Grito de Independencia
-  if (month === 6 && day === 20) return true;
-  // 7 de Agosto: Batalla de Boyacá
-  if (month === 7 && day === 7) return true;
-  // 8 de Diciembre: Inmaculada Concepción
-  if (month === 11 && day === 8) return true;
-  // 25 de Diciembre: Navidad
-  if (month === 11 && day === 25) return true;
-
-  // Calendario de festivos oficiales móviles de Colombia para el año 2026 (Ley Emiliani)
-  if (year === 2026) {
-    // Enero 12: Reyes Magos
-    if (month === 0 && day === 12) return true;
-    // Marzo 23: San José
-    if (month === 2 && day === 23) return true;
-    // Abril 2: Jueves Santo
-    if (month === 3 && day === 2) return true;
-    // Abril 3: Viernes Santo
-    if (month === 3 && day === 3) return true;
-    // Mayo 18: Ascensión del Señor
-    if (month === 4 && day === 18) return true;
-    // Junio 8: Corpus Christi
-    if (month === 5 && day === 8) return true;
-    // Junio 15: Sagrado Corazón
-    if (month === 5 && day === 15) return true;
-    // Junio 29: San Pedro y San Pablo
-    if (month === 5 && day === 29) return true;
-    // Agosto 17: Asunción de la Virgen
-    if (month === 7 && day === 17) return true;
-    // Octubre 12: Día de la Raza
-    if (month === 9 && day === 12) return true;
-    // Noviembre 2: Todos los Santos
-    if (month === 10 && day === 2) return true;
-    // Noviembre 16: Independencia de Cartagena
-    if (month === 10 && day === 16) return true;
+  // 1. Festivos fijos en Colombia (no se trasladan)
+  if (
+    (month === 0 && day === 1) ||   // 1 de Enero: Año Nuevo
+    (month === 4 && day === 1) ||   // 1 de Mayo: Día del Trabajo
+    (month === 6 && day === 20) ||  // 20 de Julio: Grito de Independencia
+    (month === 7 && day === 7) ||   // 7 de Agosto: Batalla de Boyacá
+    (month === 11 && day === 8) ||  // 8 de Diciembre: Inmaculada Concepción
+    (month === 11 && day === 25)    // 25 de Diciembre: Navidad
+  ) {
+    return true;
   }
-  
-  return false;
+
+  // 2. Festivos móviles trasladados al lunes (Ley Emiliani) y basados en Pascua
+  const pascua = calcularPascua(year);
+  const festivosMoviles: Date[] = [
+    trasladarALunes(new Date(year, 0, 6)),   // Reyes Magos (6 Ene)
+    trasladarALunes(new Date(year, 2, 19)),  // San José (19 Mar)
+    sumarDias(pascua, -3),                   // Jueves Santo
+    sumarDias(pascua, -2),                   // Viernes Santo
+    trasladarALunes(sumarDias(pascua, 39)),  // Ascensión del Señor
+    trasladarALunes(sumarDias(pascua, 60)),  // Corpus Christi
+    trasladarALunes(sumarDias(pascua, 68)),  // Sagrado Corazón de Jesús
+    trasladarALunes(new Date(year, 5, 29)),  // San Pedro y San Pablo (29 Jun)
+    trasladarALunes(new Date(year, 7, 15)),  // Asunción de la Virgen (15 Ago)
+    trasladarALunes(new Date(year, 9, 12)),  // Día de la Raza (12 Oct)
+    trasladarALunes(new Date(year, 10, 1)),  // Todos los Santos (1 Nov)
+    trasladarALunes(new Date(year, 10, 11)), // Independencia de Cartagena (11 Nov)
+  ];
+
+  return festivosMoviles.some(
+    f => f.getFullYear() === year && f.getMonth() === month && f.getDate() === day
+  );
 }
 
 /**
@@ -351,6 +424,7 @@ export function filtrarPorPeriodo(
   
   return registros.filter(reg => {
     const regDate = parseFecha(reg.fecha);
+    if (!regDate) return false;
     const regY = regDate.getFullYear();
     const regM = regDate.getMonth();
     const regD = regDate.getDate();
@@ -450,7 +524,7 @@ export function obtenerEtiquetaJustificacion(tipo: TipoJustificacion): string {
 }
 
 /**
- * Obtiene el mapa de justificaciones guardadas de localStorage.
+ * Obtiene el mapa de justificaciones en caché local (sincronizado desde Supabase).
  * Estructura: { [AUXILIAR_UPPER]: { [FECHA_DD_MM_YYYY]: JustificacionDia } }
  */
 export function obtenerJustificacionesStorage(): Record<string, Record<string, JustificacionDia>> {
@@ -464,32 +538,92 @@ export function obtenerJustificacionesStorage(): Record<string, Record<string, J
 }
 
 /**
- * Guarda o actualiza una justificación para un auxiliar y fecha específica.
+ * Descarga todas las justificaciones desde Supabase, reconstruye la forma
+ * { [AUXILIAR_UPPER]: { [FECHA]: JustificacionDia } } y actualiza el caché local.
  */
-export function guardarJustificacionStorage(justificacion: JustificacionDia): void {
-  const current = obtenerJustificacionesStorage();
-  const auxKey = normalizarNombre(justificacion.auxiliar);
-  if (!current[auxKey]) {
-    current[auxKey] = {};
-  }
-  current[auxKey][justificacion.fecha.trim()] = {
-    ...justificacion,
-    auxiliar: auxKey,
-    fecha: justificacion.fecha.trim(),
-    fechaCreacion: justificacion.fechaCreacion || new Date().toISOString()
-  };
-  safeLocalStorage.setItem('ferricar_justificaciones_dias', JSON.stringify(current));
+export async function sincronizarJustificacionesDesdeNube(): Promise<Record<string, Record<string, JustificacionDia>>> {
+  const rows = await obtenerJustificaciones();
+  const map: Record<string, Record<string, JustificacionDia>> = {};
+
+  rows.forEach(row => {
+    if (!row || !row.auxiliar || !row.fecha) return;
+    const auxKey = normalizarNombre(row.auxiliar);
+    const fechaKey = row.fecha.trim();
+    if (!map[auxKey]) {
+      map[auxKey] = {};
+    }
+    const detalle = (row.detalle && typeof row.detalle === 'object') ? row.detalle : {};
+    map[auxKey][fechaKey] = {
+      ...detalle,
+      id: row.id || detalle.id,
+      auxiliar: auxKey,
+      fecha: fechaKey,
+      tipo: row.tipo as TipoJustificacion,
+      nota: row.nota ?? undefined,
+      fechaCreacion: detalle.fechaCreacion || row.created_at,
+    };
+  });
+
+  safeLocalStorage.setItem('ferricar_justificaciones_dias', JSON.stringify(map));
+  return map;
 }
 
 /**
- * Elimina una justificación registrada para un auxiliar en una fecha.
+ * Guarda o actualiza una justificación en Supabase y actualiza el caché local solo si tuvo éxito.
  */
-export function eliminarJustificacionStorage(auxiliar: string, fecha: string): void {
+export async function guardarJustificacionStorage(justificacion: JustificacionDia): Promise<boolean> {
+  const auxKey = normalizarNombre(justificacion.auxiliar);
+  const fechaKey = justificacion.fecha.trim();
+  const fechaCreacion = justificacion.fechaCreacion || new Date().toISOString();
+
+  const payload: JustificacionDia = {
+    ...justificacion,
+    auxiliar: auxKey,
+    fecha: fechaKey,
+    fechaCreacion,
+  };
+
+  const saved = await guardarJustificacionSupa(payload);
+  if (!saved) {
+    return false;
+  }
+
   const current = obtenerJustificacionesStorage();
+  if (!current[auxKey]) {
+    current[auxKey] = {};
+  }
+  const detalle = (saved.detalle && typeof saved.detalle === 'object') ? saved.detalle : {};
+  current[auxKey][fechaKey] = {
+    ...payload,
+    ...detalle,
+    id: saved.id || payload.id,
+    auxiliar: auxKey,
+    fecha: fechaKey,
+    tipo: (saved.tipo as TipoJustificacion) || payload.tipo,
+    nota: saved.nota ?? payload.nota,
+    fechaCreacion: detalle.fechaCreacion || fechaCreacion,
+  };
+  safeLocalStorage.setItem('ferricar_justificaciones_dias', JSON.stringify(current));
+  return true;
+}
+
+/**
+ * Elimina una justificación en Supabase y actualiza el caché local solo si tuvo éxito.
+ */
+export async function eliminarJustificacionStorage(auxiliar: string, fecha: string): Promise<boolean> {
   const auxKey = normalizarNombre(auxiliar);
-  if (current[auxKey] && current[auxKey][fecha.trim()]) {
-    delete current[auxKey][fecha.trim()];
+  const fechaKey = fecha.trim();
+
+  const ok = await eliminarJustificacionSupa(auxKey, fechaKey);
+  if (!ok) {
+    return false;
+  }
+
+  const current = obtenerJustificacionesStorage();
+  if (current[auxKey] && current[auxKey][fechaKey]) {
+    delete current[auxKey][fechaKey];
     safeLocalStorage.setItem('ferricar_justificaciones_dias', JSON.stringify(current));
   }
+  return true;
 }
 

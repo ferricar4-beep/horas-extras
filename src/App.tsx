@@ -21,7 +21,7 @@ import {
   CheckCircle2
 } from 'lucide-react';
 
-import { Registro, AuxiliarStats, PeriodoFiltro, NavTab, CargoTipo } from './types';
+import { Registro, AuxiliarStats, PeriodoFiltro, NavTab, CargoTipo, JustificacionDia } from './types';
 import {
   filtrarPorPeriodo,
   getSemanaAno,
@@ -35,7 +35,9 @@ import {
   safeLocalStorage,
   calcularJornada,
   calcularHorasExtra,
-  toMins
+  toMins,
+  sincronizarJustificacionesDesdeNube,
+  obtenerJustificacionesStorage
 } from './utils';
 
 // Importar componentes de la nueva arquitectura UX/UI
@@ -57,11 +59,16 @@ import {
   eliminarRegistro,
   verificarConexion,
   RegistroSupabase,
+  CredencialSupabase,
   obtenerCredenciales,
   guardarCredencial,
   eliminarCredencial,
   eliminarRegistrosDeAuxiliar,
-  actualizarRegistro
+  actualizarRegistro,
+  eliminarJustificacionesDeAuxiliar,
+  guardarJustificacion,
+  obtenerAppConfig,
+  guardarAppConfig
 } from './supabase';
 
 const FALLBACK_REGISTROS: Registro[] = [
@@ -204,8 +211,8 @@ export default function App() {
     });
 
     return unique.sort((a, b) => {
-      const dateA = parseFecha(a.fecha).getTime();
-      const dateB = parseFecha(b.fecha).getTime();
+      const dateA = parseFecha(a.fecha)?.getTime() ?? 0;
+      const dateB = parseFecha(b.fecha)?.getTime() ?? 0;
       if (dateB !== dateA) {
         return dateB - dateA;
       }
@@ -220,8 +227,10 @@ export default function App() {
 
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [cargando, setCargando] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [origenData, setOrigenData] = useState<'sheet' | 'local' | 'supabase'>('local');
   const [supabaseConectado, setSupabaseConectado] = useState<boolean>(false);
+  const syncingQueueRef = React.useRef<boolean>(false);
 
   // Filtros globales
   const [filtroPeriodo, setFiltroPeriodo] = useState<PeriodoFiltro>('ultimos_15_dias');
@@ -265,23 +274,25 @@ export default function App() {
 
   const [pinsMap, setPinsMap] = useState<Record<string, string>>({});
 
-  // Auxiliares personalizados
-  const [customAuxiliares, setCustomAuxiliares] = useState<string[]>(() => {
-    const stored = safeLocalStorage.getItem('ferricar_custom_auxiliares');
-    if (stored) {
+  // Lista de auxiliares con credencial en Supabase (caché offline desde ferricar_user_pins)
+  const [credencialesAuxiliares, setCredencialesAuxiliares] = useState<string[]>(() => {
+    const storedPins = safeLocalStorage.getItem('ferricar_user_pins');
+    if (storedPins) {
       try {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
-          return parsed.map(item => String(item).trim().toUpperCase()).filter(Boolean);
+        const parsed = JSON.parse(storedPins);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return Object.keys(parsed)
+            .map(k => normalizarNombre(k))
+            .filter(k => k && k !== 'ADMIN');
         }
-      } catch (e) {
+      } catch {
         return [];
       }
     }
     return [];
   });
 
-  // Cargos de auxiliares
+  // Cargos de auxiliares (sincronizado con Supabase, caché en localStorage)
   const [auxiliarCargos, setAuxiliarCargos] = useState<Record<string, string>>(() => {
     const stored = safeLocalStorage.getItem('ferricar_auxiliar_cargos');
     if (stored) {
@@ -294,9 +305,76 @@ export default function App() {
     return {};
   });
 
+  // Configuración global de la app (sincronizada con app_config en Supabase)
+  const [appConfig, setAppConfig] = useState<Record<string, string>>(() => ({
+    jornada_base: safeLocalStorage.getItem('ferricar_jornada_base') || '7',
+    overtime_threshold: safeLocalStorage.getItem('ferricar_overtime_threshold') || '10',
+    webhook_url: safeLocalStorage.getItem('ferricar_webhook_url') || 'https://n8n.ferricar.com.co/webhook-test/67f7da3c-1a22-44f2-9ad2-921d26c59b2d',
+    notif_email: safeLocalStorage.getItem('ferricar_notif_email') || 'juan.ruiz@mct.com.co',
+  }));
+
+  // Snapshot previo a sincronización para migración única al iniciar como admin
+  const preSyncLocalRef = React.useRef<{
+    cargos: Record<string, string>;
+    customAux: string[];
+    pins: Record<string, string>;
+    justificaciones: Record<string, Record<string, JustificacionDia>>;
+    config: Partial<Record<'jornada_base' | 'overtime_threshold' | 'webhook_url' | 'notif_email', string>>;
+  } | null>(null);
+
+  if (preSyncLocalRef.current === null && safeLocalStorage.getItem('ferricar_migracion_v1_done') !== 'true') {
+    let cargosInit: Record<string, string> = {};
+    try {
+      const rawC = safeLocalStorage.getItem('ferricar_auxiliar_cargos');
+      if (rawC) cargosInit = JSON.parse(rawC) || {};
+    } catch { cargosInit = {}; }
+
+    let customInit: string[] = [];
+    try {
+      const rawCust = safeLocalStorage.getItem('ferricar_custom_auxiliares');
+      if (rawCust) {
+        const parsed = JSON.parse(rawCust);
+        if (Array.isArray(parsed)) customInit = parsed.map(x => normalizarNombre(String(x))).filter(Boolean);
+      }
+    } catch { customInit = []; }
+
+    let pinsInit: Record<string, string> = {};
+    try {
+      const rawP = safeLocalStorage.getItem('ferricar_user_pins');
+      if (rawP) pinsInit = JSON.parse(rawP) || {};
+    } catch { pinsInit = {}; }
+
+    const justifInit = obtenerJustificacionesStorage();
+    const configInit: Partial<Record<'jornada_base' | 'overtime_threshold' | 'webhook_url' | 'notif_email', string>> = {};
+    const jb = safeLocalStorage.getItem('ferricar_jornada_base');
+    if (jb !== null && jb.trim() !== '') configInit.jornada_base = jb;
+    const ot = safeLocalStorage.getItem('ferricar_overtime_threshold');
+    if (ot !== null && ot.trim() !== '') configInit.overtime_threshold = ot;
+    const wu = safeLocalStorage.getItem('ferricar_webhook_url');
+    if (wu !== null && wu.trim() !== '') configInit.webhook_url = wu;
+    const ne = safeLocalStorage.getItem('ferricar_notif_email');
+    if (ne !== null && ne.trim() !== '') configInit.notif_email = ne;
+
+    preSyncLocalRef.current = {
+      cargos: cargosInit,
+      customAux: customInit,
+      pins: pinsInit,
+      justificaciones: justifInit,
+      config: configInit,
+    };
+  }
+
+  const cloudSnapshotRef = React.useRef<{
+    creds: CredencialSupabase[];
+    justifMap: Record<string, Record<string, JustificacionDia>>;
+    appConfig: Record<string, string>;
+  } | null>(null);
+  const [cloudSyncTick, setCloudSyncTick] = useState(0);
+  const migratingRef = React.useRef(false);
+
   const obtenerCargoDisplay = (name: string): string => {
     if (!name) return 'Auxiliar de Carga';
-    const cargo = auxiliarCargos[name.toUpperCase()];
+    const cargo = auxiliarCargos[normalizarNombre(name)];
     if (cargo === 'escolta') return 'Escolta';
     if (cargo === 'auxiliar_operaciones') return 'Auxiliar de Operaciones';
     return 'Auxiliar de Carga';
@@ -386,6 +464,102 @@ export default function App() {
     setMatchingAuxiliares([]);
   };
 
+  const buildBusinessKey = (r: { auxiliar?: string; fecha?: string; horaIngreso?: string; horaSalida?: string; vehiculo?: string }) => {
+    const normAux = normalizarNombre(r.auxiliar || '');
+    return `${normAux}|${(r.fecha || '').trim()}|${(r.horaIngreso || '').trim()}|${(r.horaSalida || '').trim()}|${(r.vehiculo || '').trim().toUpperCase()}`;
+  };
+
+  const mapSupabaseRegistros = (regs: RegistroSupabase[]): Registro[] =>
+    regs.map(r => ({
+      id: r.id || '',
+      marcaTemporal: r.marca_temporal || '',
+      auxiliar: r.auxiliar,
+      vehiculo: r.vehiculo,
+      fecha: r.fecha,
+      horaIngreso: r.hora_ingreso,
+      horaSalida: r.hora_salida,
+      ruta: r.ruta,
+      jornada: r.jornada,
+      horasExtras: r.horas_extras,
+      esNocturno: r.es_nocturno,
+      originalRow: {}
+    }));
+
+  // Sincronización de la cola offline ('ferricar_manual_registros') hacia Supabase
+  const sincronizarColaOffline = async (registrosNube: Registro[]): Promise<number> => {
+    if (syncingQueueRef.current) return 0;
+    syncingQueueRef.current = true;
+    try {
+      const rawQueue = safeLocalStorage.getItem('ferricar_manual_registros');
+      if (!rawQueue) return 0;
+
+      let queue: Registro[] = [];
+      try {
+        const parsed = JSON.parse(rawQueue);
+        if (Array.isArray(parsed)) queue = parsed;
+      } catch {
+        return 0;
+      }
+
+      if (queue.length === 0) return 0;
+
+      const existingKeys = new Set<string>(registrosNube.map(buildBusinessKey));
+      const remaining: Registro[] = [];
+      let syncedCount = 0;
+
+      for (const item of queue) {
+        if (!item || !item.auxiliar || !item.fecha) continue;
+        const bKey = buildBusinessKey(item);
+
+        // Si ya existe en Supabase por llave de negocio, retirarlo de la cola sin duplicar
+        if (existingKeys.has(bKey)) {
+          continue;
+        }
+
+        const regSupa: RegistroSupabase = {
+          auxiliar: item.auxiliar.trim().toUpperCase(),
+          vehiculo: (item.vehiculo || 'N/A').trim().toUpperCase(),
+          fecha: item.fecha.trim(),
+          hora_ingreso: item.horaIngreso,
+          hora_salida: item.horaSalida,
+          ruta: (item.ruta || 'N/A').trim().toUpperCase(),
+          jornada: item.jornada,
+          horas_extras: item.horasExtras,
+          es_nocturno: item.esNocturno || false,
+          origen: 'manual',
+        };
+
+        const guardado = await insertarRegistro(regSupa);
+        if (guardado) {
+          syncedCount++;
+          existingKeys.add(bKey);
+        } else {
+          remaining.push(item);
+        }
+      }
+
+      setManualRegistros(remaining);
+      safeLocalStorage.setItem('ferricar_manual_registros', JSON.stringify(remaining));
+
+      if (syncedCount > 0) {
+        try {
+          const updatedCloud = await obtenerRegistros();
+          setSheetRegistros(mapSupabaseRegistros(updatedCloud));
+        } catch {
+          // Si falla la recarga inmediata, ya quedaron en Supabase y se reflejarán en el próximo sync
+        }
+        setToastMessage({
+          text: `${syncedCount} turnos pendientes sincronizados`,
+          type: 'success',
+        });
+      }
+
+      return syncedCount;
+    } finally {
+      syncingQueueRef.current = false;
+    }
+  };
+
   // Carga inicial y sincronización
   const sincronizarDatos = async () => {
     setCargando(true);
@@ -394,50 +568,99 @@ export default function App() {
       setSupabaseConectado(conectado);
 
       if (conectado) {
-        const regs = await obtenerRegistros();
-        if (regs.length > 0) {
-          const convertidos: Registro[] = regs.map(r => ({
-            id: r.id || '',
-            marcaTemporal: r.marca_temporal || '',
-            auxiliar: r.auxiliar,
-            vehiculo: r.vehiculo,
-            fecha: r.fecha,
-            horaIngreso: r.hora_ingreso,
-            horaSalida: r.hora_salida,
-            ruta: r.ruta,
-            jornada: r.jornada,
-            horasExtras: r.horas_extras,
-            esNocturno: r.es_nocturno,
-            originalRow: {}
-          }));
-          setSheetRegistros(convertidos);
-          setOrigenData('supabase');
-        }
+        const [regs, creds, cloudConfig, cloudJustifMap] = await Promise.all([
+          obtenerRegistros(),
+          obtenerCredenciales(),
+          obtenerAppConfig(),
+          sincronizarJustificacionesDesdeNube(),
+        ]);
 
-        // Cargar credenciales desde Supabase
-        const creds = await obtenerCredenciales();
-        if (creds && creds.length > 0) {
-          const dbPins: Record<string, string> = {};
+        const convertidos = mapSupabaseRegistros(regs);
+        setSheetRegistros(convertidos);
+        setOrigenData('supabase');
+        setLoadError(null);
+
+        // Cargar credenciales y cargos desde Supabase
+        const dbPins: Record<string, string> = {};
+        const dbCargos: Record<string, string> = {};
+        const credsAuxList: string[] = [];
+
+        if (Array.isArray(creds)) {
           creds.forEach(c => {
-            if (c.auxiliar && c.pin) {
-              const cleanA = c.auxiliar.trim().toUpperCase();
+            if (!c.auxiliar) return;
+            const cleanA = normalizarNombre(c.auxiliar);
+            if (c.pin) {
               dbPins[cleanA] = c.pin;
               if (cleanA === 'ADMIN') {
                 dbPins['admin'] = c.pin;
               }
             }
+            if (cleanA !== 'ADMIN') {
+              credsAuxList.push(cleanA);
+              if (c.cargo && c.cargo.trim()) {
+                dbCargos[cleanA] = c.cargo.trim();
+              }
+            }
           });
-          const localPins = getPinsDirectory([]);
-          const mergedPins = { ...localPins, ...dbPins };
-          setPinsMap(mergedPins);
-          safeLocalStorage.setItem('ferricar_user_pins', JSON.stringify(mergedPins));
         }
+
+        const localPins = getPinsDirectory([]);
+        const mergedPins = { ...localPins, ...dbPins };
+        setPinsMap(mergedPins);
+        safeLocalStorage.setItem('ferricar_user_pins', JSON.stringify(mergedPins));
+
+        // Actualizar lista de auxiliares sin turnos derivada de auxiliares_credenciales
+        setCredencialesAuxiliares(Array.from(new Set(credsAuxList)));
+
+        // Actualizar mapa de cargos con Supabase como fuente de verdad (manteniendo caché local si nube aún no tiene cargo)
+        let localCargosCache: Record<string, string> = {};
+        try {
+          const rawCargos = safeLocalStorage.getItem('ferricar_auxiliar_cargos');
+          if (rawCargos) localCargosCache = JSON.parse(rawCargos) || {};
+        } catch { localCargosCache = {}; }
+        const mergedCargos = { ...localCargosCache, ...dbCargos };
+        setAuxiliarCargos(mergedCargos);
+        safeLocalStorage.setItem('ferricar_auxiliar_cargos', JSON.stringify(mergedCargos));
+
+        // Sincronizar app_config desde Supabase y espejar en localStorage para lecturas síncronas
+        const nextConfig: Record<string, string> = {
+          jornada_base: cloudConfig.jornada_base ?? safeLocalStorage.getItem('ferricar_jornada_base') ?? '7',
+          overtime_threshold: cloudConfig.overtime_threshold ?? safeLocalStorage.getItem('ferricar_overtime_threshold') ?? '10',
+          webhook_url: cloudConfig.webhook_url ?? safeLocalStorage.getItem('ferricar_webhook_url') ?? 'https://n8n.ferricar.com.co/webhook-test/67f7da3c-1a22-44f2-9ad2-921d26c59b2d',
+          notif_email: cloudConfig.notif_email ?? safeLocalStorage.getItem('ferricar_notif_email') ?? 'juan.ruiz@mct.com.co',
+        };
+        if (cloudConfig.jornada_base !== undefined) safeLocalStorage.setItem('ferricar_jornada_base', cloudConfig.jornada_base);
+        if (cloudConfig.overtime_threshold !== undefined) safeLocalStorage.setItem('ferricar_overtime_threshold', cloudConfig.overtime_threshold);
+        if (cloudConfig.webhook_url !== undefined) safeLocalStorage.setItem('ferricar_webhook_url', cloudConfig.webhook_url);
+        if (cloudConfig.notif_email !== undefined) safeLocalStorage.setItem('ferricar_notif_email', cloudConfig.notif_email);
+        setAppConfig(nextConfig);
+
+        cloudSnapshotRef.current = {
+          creds: Array.isArray(creds) ? creds : [],
+          justifMap: cloudJustifMap || {},
+          appConfig: cloudConfig || {},
+        };
+        setCloudSyncTick(t => t + 1);
+
+        // Intentar subir registros pendientes de la cola offline
+        await sincronizarColaOffline(convertidos);
       } else {
         setOrigenData('local');
+        setLoadError('No se pudieron cargar los datos desde Supabase');
+        setToastMessage({
+          text: 'No se pudieron cargar los datos desde Supabase',
+          type: 'error',
+        });
       }
     } catch (e) {
       console.error('Error al sincronizar con Supabase:', e);
+      setSupabaseConectado(false);
       setOrigenData('local');
+      setLoadError('No se pudieron cargar los datos desde Supabase');
+      setToastMessage({
+        text: 'No se pudieron cargar los datos desde Supabase',
+        type: 'error',
+      });
     } finally {
       setCargando(false);
     }
@@ -445,25 +668,138 @@ export default function App() {
 
   useEffect(() => {
     sincronizarDatos();
+
+    const handleOnline = () => {
+      sincronizarDatos();
+    };
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+    };
   }, []);
 
-  // Lista unificada de auxiliares
+  // Migración única al iniciar sesión como admin: sube datos locales faltantes sin sobrescribir la nube
+  useEffect(() => {
+    if (userRole !== 'admin') return;
+    if (!cloudSnapshotRef.current) return;
+    if (safeLocalStorage.getItem('ferricar_migracion_v1_done') === 'true') return;
+    if (migratingRef.current) return;
+
+    const snapshotLocal = preSyncLocalRef.current;
+    if (!snapshotLocal) {
+      safeLocalStorage.setItem('ferricar_migracion_v1_done', 'true');
+      return;
+    }
+
+    const runMigration = async () => {
+      migratingRef.current = true;
+      try {
+        const cloud = cloudSnapshotRef.current;
+        if (!cloud) return;
+
+        let migratedCount = 0;
+        let hadError = false;
+
+        // 1. Migrar auxiliares sin turnos y cargos faltantes en auxiliares_credenciales
+        const cloudCredsByAux: Record<string, CredencialSupabase> = {};
+        cloud.creds.forEach(c => {
+          if (c.auxiliar) {
+            cloudCredsByAux[normalizarNombre(c.auxiliar)] = c;
+          }
+        });
+
+        const candidateAuxSet = new Set<string>([
+          ...snapshotLocal.customAux.map(a => normalizarNombre(a)),
+          ...Object.keys(snapshotLocal.cargos).map(a => normalizarNombre(a)),
+        ]);
+
+        for (const cleanAux of candidateAuxSet) {
+          if (!cleanAux || cleanAux === 'ADMIN') continue;
+          const cloudCred = cloudCredsByAux[cleanAux];
+          const localCargo = snapshotLocal.cargos[cleanAux] || '';
+          const localPin = snapshotLocal.pins[cleanAux] || '1234';
+
+          if (!cloudCred) {
+            const ok = await guardarCredencial(cleanAux, localPin, localCargo || 'auxiliar_carga');
+            if (ok) migratedCount++;
+            else hadError = true;
+          } else if ((!cloudCred.cargo || !cloudCred.cargo.trim()) && localCargo) {
+            const ok = await guardarCredencial(cleanAux, undefined, localCargo);
+            if (ok) migratedCount++;
+            else hadError = true;
+          }
+        }
+
+        // 2. Migrar justificaciones locales faltantes en auxiliares_justificaciones
+        for (const [rawAux, fechasObj] of Object.entries(snapshotLocal.justificaciones || {})) {
+          const auxKey = normalizarNombre(rawAux);
+          if (!auxKey || !fechasObj || typeof fechasObj !== 'object') continue;
+          for (const [fechaKey, justif] of Object.entries(fechasObj)) {
+            if (!justif || !justif.tipo) continue;
+            const existeEnNube = !!cloud.justifMap?.[auxKey]?.[fechaKey.trim()];
+            if (!existeEnNube) {
+              const saved = await guardarJustificacion({
+                ...justif,
+                auxiliar: auxKey,
+                fecha: fechaKey.trim(),
+              });
+              if (saved) migratedCount++;
+              else hadError = true;
+            }
+          }
+        }
+
+        // 3. Migrar app_config faltante sin sobrescribir claves existentes en la nube
+        const configToUpload: Record<string, string> = {};
+        (Object.entries(snapshotLocal.config || {}) as [string, string | undefined][]).forEach(([clave, valor]) => {
+          if (valor !== undefined && valor.trim() !== '' && !(clave in cloud.appConfig)) {
+            configToUpload[clave] = valor;
+          }
+        });
+
+        if (Object.keys(configToUpload).length > 0) {
+          const ok = await guardarAppConfig(configToUpload);
+          if (ok) migratedCount++;
+          else hadError = true;
+        }
+
+        if (!hadError) {
+          safeLocalStorage.setItem('ferricar_migracion_v1_done', 'true');
+          if (migratedCount > 0) {
+            setToastMessage({ text: 'Datos locales migrados a la nube', type: 'success' });
+            await sincronizarDatos();
+          }
+        } else {
+          setToastMessage({
+            text: 'Algunos datos locales no pudieron migrarse a Supabase. Se reintentará al sincronizar.',
+            type: 'error',
+          });
+        }
+      } finally {
+        migratingRef.current = false;
+      }
+    };
+
+    runMigration();
+  }, [userRole, cloudSyncTick]);
+
+  // Lista unificada de auxiliares (registros + credenciales en Supabase)
   const listaAuxiliaresUnicos = useMemo(() => {
     const set = new Set<string>();
     registros.forEach(r => {
       if (r.auxiliar && typeof r.auxiliar === 'string') {
-        const clean = r.auxiliar.trim().toUpperCase();
-        if (clean) set.add(clean);
+        const clean = normalizarNombre(r.auxiliar);
+        if (clean && clean !== 'ADMIN') set.add(clean);
       }
     });
-    customAuxiliares.forEach(c => {
+    credencialesAuxiliares.forEach(c => {
       if (c && typeof c === 'string') {
-        const clean = c.trim().toUpperCase();
-        if (clean) set.add(clean);
+        const clean = normalizarNombre(c);
+        if (clean && clean !== 'ADMIN') set.add(clean);
       }
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }));
-  }, [registros, customAuxiliares]);
+  }, [registros, credencialesAuxiliares]);
 
   // Actualizar pinsMap cuando cambie la lista de auxiliares
   useEffect(() => {
@@ -523,11 +859,13 @@ export default function App() {
         fin = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10));
       }
     } else {
-      if (registros.length > 0) {
-        let minDate = parseFecha(registros[0].fecha);
-        let maxDate = parseFecha(registros[0].fecha);
-        registros.forEach(r => {
-          const d = parseFecha(r.fecha);
+      const validDates = registros
+        .map(r => parseFecha(r.fecha))
+        .filter((d): d is Date => d !== null);
+      if (validDates.length > 0) {
+        let minDate = validDates[0];
+        let maxDate = validDates[0];
+        validDates.forEach(d => {
           if (d < minDate) minDate = d;
           if (d > maxDate) maxDate = d;
         });
@@ -574,12 +912,11 @@ export default function App() {
         const diaSemana = diasSemanaNombres[dateObj.getDay()];
 
         const tieneRegistro = regsAux.some(r => {
-          try {
-            const rDate = parseFecha(r.fecha);
+          const rDate = parseFecha(r.fecha);
+          if (rDate) {
             return rDate.getDate() === day && rDate.getMonth() === (m - 1) && rDate.getFullYear() === y;
-          } catch {
-            return r.fecha === fStr;
           }
+          return r.fecha === fStr;
         });
 
         if (tieneRegistro) {
@@ -628,7 +965,7 @@ export default function App() {
   }, [registrosFiltrados]);
 
   // Handlers para Registros
-  const handleAgregarRegistro = async (nuevoReg: Registro) => {
+  const handleAgregarRegistro = async (nuevoReg: Registro): Promise<boolean> => {
     // Validar duplicados existentes para el mismo auxiliar y misma fecha/horario
     const yaExiste = registros.some(r =>
       normalizarNombre(r.auxiliar) === normalizarNombre(nuevoReg.auxiliar) &&
@@ -644,7 +981,7 @@ export default function App() {
       return false;
     }
 
-    if (supabaseConectado) {
+    if (supabaseConectado && navigator.onLine) {
       const regSupa: RegistroSupabase = {
         auxiliar: nuevoReg.auxiliar,
         vehiculo: nuevoReg.vehiculo,
@@ -658,69 +995,65 @@ export default function App() {
         origen: 'manual'
       };
       const guardado = await insertarRegistro(regSupa);
-      if (guardado) {
-        setJustAddedId(String(guardado.id));
-        setTimeout(() => setJustAddedId(null), 4000);
-        const regs = await obtenerRegistros();
-        const convertidos: Registro[] = regs.map(r => ({
-          id: r.id || '',
-          marcaTemporal: r.marca_temporal || '',
-          auxiliar: r.auxiliar,
-          vehiculo: r.vehiculo,
-          fecha: r.fecha,
-          horaIngreso: r.hora_ingreso,
-          horaSalida: r.hora_salida,
-          ruta: r.ruta,
-          jornada: r.jornada,
-          horasExtras: r.horas_extras,
-          esNocturno: r.es_nocturno,
-          originalRow: {}
-        }));
-        setSheetRegistros(convertidos);
-        setToastMessage({ text: 'Registro guardado exitosamente en Supabase.', type: 'success' });
-        return;
+      if (!guardado) {
+        setToastMessage({
+          text: 'Error al guardar el registro en Supabase. No se guardó el cambio.',
+          type: 'error',
+        });
+        return false;
       }
+
+      setJustAddedId(String(guardado.id));
+      setTimeout(() => setJustAddedId(null), 4000);
+      try {
+        const regs = await obtenerRegistros();
+        setSheetRegistros(mapSupabaseRegistros(regs));
+      } catch {
+        setSheetRegistros(prev => [{ ...nuevoReg, id: String(guardado.id || nuevoReg.id) }, ...prev]);
+      }
+      setToastMessage({ text: 'Registro guardado exitosamente en Supabase.', type: 'success' });
+      return true;
     }
-    // Fallback local
+
+    // Fallback offline de contingencia (solo cuando no hay conexión)
     setJustAddedId(nuevoReg.id);
     setTimeout(() => setJustAddedId(null), 4000);
     const updated = [nuevoReg, ...manualRegistros];
     setManualRegistros(updated);
     safeLocalStorage.setItem('ferricar_manual_registros', JSON.stringify(updated));
-    setToastMessage({ text: 'Guardado localmente de contingencia.', type: 'success' });
+    setToastMessage({ text: 'Guardado localmente de contingencia (sin conexión).', type: 'info' });
+    return true;
   };
 
-  const handleEliminarRegistro = async (id: string) => {
-    if (supabaseConectado) {
+  const handleEliminarRegistro = async (id: string): Promise<boolean> => {
+    const isLocalOnly = id.startsWith('manual') || !sheetRegistros.some(r => r.id === id);
+    if (!isLocalOnly) {
       const exito = await eliminarRegistro(id);
-      if (exito) {
-        const regs = await obtenerRegistros();
-        const convertidos: Registro[] = regs.map(r => ({
-          id: r.id || '',
-          marcaTemporal: r.marca_temporal || '',
-          auxiliar: r.auxiliar,
-          vehiculo: r.vehiculo,
-          fecha: r.fecha,
-          horaIngreso: r.hora_ingreso,
-          horaSalida: r.hora_salida,
-          ruta: r.ruta,
-          jornada: r.jornada,
-          horasExtras: r.horas_extras,
-          esNocturno: r.es_nocturno,
-          originalRow: {}
-        }));
-        setSheetRegistros(convertidos);
-        setToastMessage({ text: 'Registro eliminado de Supabase.', type: 'success' });
-        return;
+      if (!exito) {
+        setToastMessage({
+          text: 'Error al eliminar el registro en Supabase. No se realizaron cambios.',
+          type: 'error',
+        });
+        return false;
       }
+      try {
+        const regs = await obtenerRegistros();
+        setSheetRegistros(mapSupabaseRegistros(regs));
+      } catch {
+        setSheetRegistros(prev => prev.filter(r => r.id !== id));
+      }
+      setToastMessage({ text: 'Registro eliminado de Supabase.', type: 'success' });
+      return true;
     }
+
     const updated = manualRegistros.filter(r => r.id !== id);
     setManualRegistros(updated);
     safeLocalStorage.setItem('ferricar_manual_registros', JSON.stringify(updated));
     setToastMessage({ text: 'Registro local eliminado.', type: 'info' });
+    return true;
   };
 
-  const handleActualizarRegistro = async (id: string, updatedFields: Partial<Registro>) => {
+  const handleActualizarRegistro = async (id: string, updatedFields: Partial<Registro>): Promise<boolean> => {
     let jornada = updatedFields.jornada;
     let horasExtras = updatedFields.horasExtras;
     let esNocturno = updatedFields.esNocturno;
@@ -739,9 +1072,8 @@ export default function App() {
     };
 
     const isManual = id.startsWith('manual') || !sheetRegistros.some(r => r.id === id);
-    let exitoSupa = false;
 
-    if (supabaseConectado && !isManual) {
+    if (!isManual) {
       const regSupa: Partial<RegistroSupabase> = {
         auxiliar: fieldsToApply.auxiliar ? fieldsToApply.auxiliar.trim().toUpperCase() : undefined,
         vehiculo: fieldsToApply.vehiculo ? fieldsToApply.vehiculo.trim().toUpperCase() : undefined,
@@ -754,26 +1086,23 @@ export default function App() {
         es_nocturno: esNocturno,
       };
 
-      exitoSupa = await actualizarRegistro(id, regSupa);
-      if (exitoSupa) {
-        const regs = await obtenerRegistros();
-        const convertidos: Registro[] = regs.map(r => ({
-          id: r.id || '',
-          marcaTemporal: r.marca_temporal || '',
-          auxiliar: r.auxiliar,
-          vehiculo: r.vehiculo,
-          fecha: r.fecha,
-          horaIngreso: r.hora_ingreso,
-          horaSalida: r.hora_salida,
-          ruta: r.ruta,
-          jornada: r.jornada,
-          horasExtras: r.horas_extras,
-          esNocturno: r.es_nocturno,
-          originalRow: {}
-        }));
-        setSheetRegistros(convertidos);
-        setToastMessage({ text: 'Registro actualizado en Supabase.', type: 'success' });
+      const exitoSupa = await actualizarRegistro(id, regSupa);
+      if (!exitoSupa) {
+        setToastMessage({
+          text: 'Error al actualizar el registro en Supabase. No se guardaron los cambios.',
+          type: 'error',
+        });
+        return false;
       }
+
+      try {
+        const regs = await obtenerRegistros();
+        setSheetRegistros(mapSupabaseRegistros(regs));
+      } catch {
+        setSheetRegistros(prev => prev.map(r => (r.id === id ? { ...r, ...fieldsToApply } : r)));
+      }
+      setToastMessage({ text: 'Registro actualizado en Supabase.', type: 'success' });
+      return true;
     }
 
     const updatedManual = manualRegistros.map(r => {
@@ -790,22 +1119,25 @@ export default function App() {
     });
     setManualRegistros(updatedManual);
     safeLocalStorage.setItem('ferricar_manual_registros', JSON.stringify(updatedManual));
-
-    if (!exitoSupa) {
-      setToastMessage({ text: 'Registro actualizado.', type: 'success' });
-    }
+    setToastMessage({ text: 'Registro local actualizado.', type: 'success' });
+    return true;
   };
 
-  // Handlers para Auxiliares (Gestión completa)
-  const handleCrearAuxiliar = async (nombre: string, pin: string, cargo: string) => {
-    const cleanNombre = nombre.trim().toUpperCase();
+  // Handlers para Auxiliares (Supabase como fuente de verdad)
+  const handleCrearAuxiliar = async (nombre: string, pin: string, cargo: string): Promise<boolean> => {
+    const cleanNombre = normalizarNombre(nombre);
     const cleanPin = pin.trim();
 
-    if (!customAuxiliares.includes(cleanNombre)) {
-      const updated = [...customAuxiliares, cleanNombre];
-      setCustomAuxiliares(updated);
-      safeLocalStorage.setItem('ferricar_custom_auxiliares', JSON.stringify(updated));
+    const ok = await guardarCredencial(cleanNombre, cleanPin, cargo);
+    if (!ok) {
+      setToastMessage({
+        text: `Error al crear a ${formatoNombreCapital(cleanNombre)} en Supabase. No se guardó el cambio.`,
+        type: 'error',
+      });
+      return false;
     }
+
+    setCredencialesAuxiliares(prev => (prev.includes(cleanNombre) ? prev : [...prev, cleanNombre]));
 
     const updatedPins = { ...pinsMap, [cleanNombre]: cleanPin };
     setPinsMap(updatedPins);
@@ -815,52 +1147,133 @@ export default function App() {
     setAuxiliarCargos(updatedCargos);
     safeLocalStorage.setItem('ferricar_auxiliar_cargos', JSON.stringify(updatedCargos));
 
-    if (supabaseConectado) {
-      await guardarCredencial(cleanNombre, cleanPin);
-    }
-
-    setToastMessage({ text: `Auxiliar ${formatoNombreCapital(cleanNombre)} creado con éxito.`, type: 'success' });
+    setToastMessage({ text: `Auxiliar ${formatoNombreCapital(cleanNombre)} creado en Supabase.`, type: 'success' });
+    return true;
   };
 
-  const handleUpdatePin = async (auxiliarName: string, newPin: string) => {
+  const handleUpdatePin = async (auxiliarName: string, newPin: string): Promise<boolean> => {
     const isEditingAdmin = auxiliarName === 'ADMIN' || auxiliarName === 'admin';
-    const cleanName = isEditingAdmin ? 'ADMIN' : auxiliarName.trim().toUpperCase();
+    const cleanName = isEditingAdmin ? 'ADMIN' : normalizarNombre(auxiliarName);
     const cleanPin = newPin.trim();
+
+    const ok = await guardarCredencial(cleanName, cleanPin);
+    if (!ok) {
+      setToastMessage({
+        text: `Error al actualizar el PIN de ${isEditingAdmin ? 'ADMIN' : formatoNombreCapital(cleanName)} en Supabase. No se guardó el cambio.`,
+        type: 'error',
+      });
+      return false;
+    }
 
     const updatedPins = { ...pinsMap, [cleanName]: cleanPin };
     if (isEditingAdmin) updatedPins['admin'] = cleanPin;
     setPinsMap(updatedPins);
     safeLocalStorage.setItem('ferricar_user_pins', JSON.stringify(updatedPins));
 
-    if (supabaseConectado) {
-      await guardarCredencial(cleanName, cleanPin);
+    if (!isEditingAdmin) {
+      setCredencialesAuxiliares(prev => (prev.includes(cleanName) ? prev : [...prev, cleanName]));
     }
 
-    setToastMessage({ text: `PIN de ${isEditingAdmin ? 'ADMIN' : formatoNombreCapital(cleanName)} actualizado.`, type: 'success' });
+    setToastMessage({ text: `PIN de ${isEditingAdmin ? 'ADMIN' : formatoNombreCapital(cleanName)} actualizado en Supabase.`, type: 'success' });
+    return true;
   };
 
-  const handleUpdateCargo = (auxiliarName: string, newCargo: string) => {
-    const cleanName = auxiliarName.trim().toUpperCase();
+  const handleUpdateCargo = async (auxiliarName: string, newCargo: string): Promise<boolean> => {
+    const cleanName = normalizarNombre(auxiliarName);
+
+    const ok = await guardarCredencial(cleanName, undefined, newCargo);
+    if (!ok) {
+      setToastMessage({
+        text: `Error al actualizar el cargo de ${formatoNombreCapital(cleanName)} en Supabase. No se guardó el cambio.`,
+        type: 'error',
+      });
+      return false;
+    }
+
     const updatedCargos = { ...auxiliarCargos, [cleanName]: newCargo };
     setAuxiliarCargos(updatedCargos);
     safeLocalStorage.setItem('ferricar_auxiliar_cargos', JSON.stringify(updatedCargos));
-    setToastMessage({ text: `Cargo de ${formatoNombreCapital(cleanName)} actualizado.`, type: 'success' });
+    setCredencialesAuxiliares(prev => (prev.includes(cleanName) ? prev : [...prev, cleanName]));
+
+    setToastMessage({ text: `Cargo de ${formatoNombreCapital(cleanName)} actualizado en Supabase.`, type: 'success' });
+    return true;
+  };
+
+  const handleSaveAppConfig = async (entries: Record<string, string>): Promise<boolean> => {
+    const ok = await guardarAppConfig(entries);
+    if (!ok) {
+      setToastMessage({
+        text: 'Error al guardar la configuración en Supabase. No se aplicaron los cambios.',
+        type: 'error',
+      });
+      return false;
+    }
+
+    if (entries.jornada_base !== undefined) safeLocalStorage.setItem('ferricar_jornada_base', entries.jornada_base);
+    if (entries.overtime_threshold !== undefined) safeLocalStorage.setItem('ferricar_overtime_threshold', entries.overtime_threshold);
+    if (entries.webhook_url !== undefined) safeLocalStorage.setItem('ferricar_webhook_url', entries.webhook_url);
+    if (entries.notif_email !== undefined) safeLocalStorage.setItem('ferricar_notif_email', entries.notif_email);
+
+    setAppConfig(prev => ({ ...prev, ...entries }));
+    setToastMessage({ text: 'Configuración guardada en Supabase.', type: 'success' });
+    return true;
   };
 
   const handleDeleteAuxiliar = async (auxiliarName: string) => {
-    const cleanName = auxiliarName.trim().toUpperCase();
-    const updatedCust = customAuxiliares.filter(a => a !== cleanName);
-    setCustomAuxiliares(updatedCust);
-    safeLocalStorage.setItem('ferricar_custom_auxiliares', JSON.stringify(updatedCust));
+    const cleanName = normalizarNombre(auxiliarName);
+    const normTarget = normalizarNombre(cleanName);
+    const turnosCount = registros.filter(r => normalizarNombre(r.auxiliar) === normTarget).length;
+
+    const confirmado = window.confirm(
+      `¿Confirmas eliminar a ${formatoNombreCapital(cleanName)}?\nSe eliminarán ${turnosCount} turno(s) registrado(s), sus credenciales, cargo y justificaciones.`
+    );
+    if (!confirmado) return;
+
+    const [credOk, regsOk, justifOk] = await Promise.all([
+      eliminarCredencial(cleanName),
+      eliminarRegistrosDeAuxiliar(cleanName),
+      eliminarJustificacionesDeAuxiliar(cleanName),
+    ]);
+    if (!credOk || !regsOk || !justifOk) {
+      setToastMessage({
+        text: `Error al eliminar a ${formatoNombreCapital(cleanName)} en Supabase. No se eliminó ningún dato local.`,
+        type: 'error',
+      });
+      return;
+    }
+
+    setCredencialesAuxiliares(prev => prev.filter(a => normalizarNombre(a) !== normTarget));
 
     const updatedPins = { ...pinsMap };
     delete updatedPins[cleanName];
     setPinsMap(updatedPins);
     safeLocalStorage.setItem('ferricar_user_pins', JSON.stringify(updatedPins));
 
-    if (supabaseConectado) {
-      await eliminarCredencial(cleanName);
-      await eliminarRegistrosDeAuxiliar(cleanName);
+    const updatedCargos = { ...auxiliarCargos };
+    delete updatedCargos[cleanName];
+    setAuxiliarCargos(updatedCargos);
+    safeLocalStorage.setItem('ferricar_auxiliar_cargos', JSON.stringify(updatedCargos));
+
+    const storedJustif = safeLocalStorage.getItem('ferricar_justificaciones_dias');
+    if (storedJustif) {
+      try {
+        const parsedJustif = JSON.parse(storedJustif);
+        if (parsedJustif && typeof parsedJustif === 'object' && normTarget in parsedJustif) {
+          delete parsedJustif[normTarget];
+          safeLocalStorage.setItem('ferricar_justificaciones_dias', JSON.stringify(parsedJustif));
+        }
+      } catch {
+        // Ignorar errores de parseo en justificaciones locales
+      }
+    }
+
+    setSheetRegistros(prev => prev.filter(r => normalizarNombre(r.auxiliar) !== normTarget));
+    const updatedManual = manualRegistros.filter(r => normalizarNombre(r.auxiliar) !== normTarget);
+    setManualRegistros(updatedManual);
+    safeLocalStorage.setItem('ferricar_manual_registros', JSON.stringify(updatedManual));
+
+    if (selectedAuxiliarForDetail && normalizarNombre(selectedAuxiliarForDetail) === normTarget) {
+      setSelectedAuxiliarForDetail(null);
     }
 
     setToastMessage({ text: `Auxiliar ${formatoNombreCapital(cleanName)} eliminado del sistema.`, type: 'info' });
@@ -899,9 +1312,9 @@ export default function App() {
     const registrosOrdenados = fuenteRegistros.sort((a, b) => {
       const compAux = a.auxiliar.localeCompare(b.auxiliar, 'es', { sensitivity: 'base' });
       if (compAux !== 0) return compAux;
-      const dateA = parseFecha(a.fecha);
-      const dateB = parseFecha(b.fecha);
-      return dateA.getTime() - dateB.getTime();
+      const dateA = parseFecha(a.fecha)?.getTime() ?? 0;
+      const dateB = parseFecha(b.fecha)?.getTime() ?? 0;
+      return dateA - dateB;
     });
 
     const rows: (string | number)[][] = [];
@@ -1053,10 +1466,12 @@ export default function App() {
     }
 
     try {
-      if (isAdmin) {
-        await handleUpdatePin('ADMIN', cleanNew);
-      } else {
-        await handleUpdatePin(loggedAuxiliarName, cleanNew);
+      const ok = isAdmin
+        ? await handleUpdatePin('ADMIN', cleanNew)
+        : await handleUpdatePin(loggedAuxiliarName, cleanNew);
+      if (!ok) {
+        setOwnPinError('No se pudo guardar la nueva clave en Supabase. Verifica tu conexión e inténtalo de nuevo.');
+        return;
       }
       setOwnPinSuccess('¡Tu clave ha sido actualizada con éxito!');
       setCurrentOwnPin('');
@@ -1074,9 +1489,10 @@ export default function App() {
   // Contadores de alertas para el sidebar
   const totalAlertasCount = useMemo(() => {
     const sinRegistros = reporteFaltasAsistencia.filter(r => r.totalFaltantes > 0).length;
-    const conFatiga = statsAuxiliares.filter(a => a.horasExtrasTotales >= 10).length;
+    const umbral = Number(appConfig.overtime_threshold || '10') || 10;
+    const conFatiga = statsAuxiliares.filter(a => a.horasExtrasTotales >= umbral).length;
     return sinRegistros + conFatiga;
-  }, [reporteFaltasAsistencia, statsAuxiliares]);
+  }, [reporteFaltasAsistencia, statsAuxiliares, appConfig.overtime_threshold]);
 
   // Pantalla de Bienvenida con animación fluida
   if (isWelcoming && welcomingUser) {
@@ -1303,6 +1719,21 @@ export default function App() {
 
           {/* Contenido Principal con Vistas Modulares */}
           <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+            {loadError && (
+              <div className="mb-4 bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl flex items-center justify-between gap-3 text-xs font-semibold shadow-2xs">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{loadError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={sincronizarDatos}
+                  className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold transition-colors cursor-pointer shrink-0"
+                >
+                  Reintentar
+                </button>
+              </div>
+            )}
             {cargando && registros.length === 0 ? (
               <div className="py-20 flex flex-col items-center justify-center text-center">
                 <div className="w-10 h-10 border-3 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-3" />
@@ -1468,6 +1899,8 @@ export default function App() {
                     isOnline={supabaseConectado}
                     onVerificarConexion={verificarConexion}
                     totalRegistrosCount={registros.length}
+                    appConfig={appConfig}
+                    onSaveAppConfig={handleSaveAppConfig}
                   />
                 )}
               </>
@@ -1519,7 +1952,7 @@ export default function App() {
                 </div>
 
                 <form
-                  onSubmit={(e) => {
+                  onSubmit={async (e) => {
                     e.preventDefault();
                     const form = e.currentTarget;
                     const fecha = (form.elements.namedItem('fecha') as HTMLInputElement).value;
@@ -1528,14 +1961,16 @@ export default function App() {
                     const vehiculo = (form.elements.namedItem('vehiculo') as HTMLInputElement).value;
                     const ruta = (form.elements.namedItem('ruta') as HTMLInputElement).value;
 
-                    handleActualizarRegistro(editingRegistro.id, {
+                    const ok = await handleActualizarRegistro(editingRegistro.id, {
                       fecha,
                       horaIngreso,
                       horaSalida,
                       vehiculo,
                       ruta
                     });
-                    setEditingRegistro(null);
+                    if (ok !== false) {
+                      setEditingRegistro(null);
+                    }
                   }}
                   className="p-5 space-y-4"
                 >

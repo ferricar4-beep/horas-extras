@@ -34,6 +34,7 @@ import {
   obtenerJustificacionesStorage,
   guardarJustificacionStorage,
   eliminarJustificacionStorage,
+  sincronizarJustificacionesDesdeNube,
   obtenerEtiquetaJustificacion,
   normalizarNombre
 } from '../utils';
@@ -105,6 +106,8 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
   const [modalJustificarOpen, setModalJustificarOpen] = useState(false);
   const [tipoJustificacionSelect, setTipoJustificacionSelect] = useState<TipoJustificacion>('descanso');
   const [notaJustificacion, setNotaJustificacion] = useState('');
+  const [guardandoJustif, setGuardandoJustif] = useState(false);
+  const [justifError, setJustifError] = useState('');
 
   // Modal para Registrar Jornada Rápida desde el día
   const [modalRegistrarOpen, setModalRegistrarOpen] = useState(false);
@@ -119,6 +122,21 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
   useEffect(() => {
     setCurrentAuxiliar(auxiliarName);
   }, [auxiliarName]);
+
+  // Sincronizar justificaciones desde Supabase al abrir el expediente
+  useEffect(() => {
+    let active = true;
+    sincronizarJustificacionesDesdeNube()
+      .then(() => {
+        if (active) setJustificacionesVersion(v => v + 1);
+      })
+      .catch(() => {
+        // Mantiene el caché local si hay error de red
+      });
+    return () => {
+      active = false;
+    };
+  }, [currentAuxiliar]);
 
   // Definición de fechas del período seleccionado
   const fechasPeriodo = useMemo(() => {
@@ -185,6 +203,7 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
       const match = registrosAuxiliar.find(r => {
         try {
           const rDate = parseFecha(r.fecha);
+          if (!rDate) return false;
           return (
             rDate.getDate() === f.diaNumero &&
             rDate.getMonth() === mes &&
@@ -282,6 +301,7 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
         try {
           const rDate = parseFecha(reg.fecha);
           if (
+            rDate &&
             rDate.getFullYear() === p.y &&
             rDate.getMonth() === p.m &&
             rDate.getDate() >= dMin &&
@@ -347,6 +367,7 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
   const handleDiaClick = (diaItem: typeof fechasPeriodo[0]) => {
     const reg = registrosPeriodoMap[diaItem.fechaStr];
     const just = justificacionesMap[diaItem.fechaStr];
+    setJustifError('');
 
     setSelectedDiaData({
       fechaStr: diaItem.fechaStr,
@@ -357,15 +378,26 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
     });
   };
 
-  // Guardar Justificación
-  const handleGuardarJustificacion = () => {
-    if (!selectedDiaData) return;
-    guardarJustificacionStorage({
+  // Guardar Justificación en Supabase
+  const handleGuardarJustificacion = async () => {
+    if (!selectedDiaData || guardandoJustif) return;
+    setJustifError('');
+    setGuardandoJustif(true);
+    const fechaCreacion = selectedDiaData.justificacion?.fechaCreacion || new Date().toISOString();
+    const ok = await guardarJustificacionStorage({
       auxiliar: currentAuxiliar,
       fecha: selectedDiaData.fechaStr,
       tipo: tipoJustificacionSelect,
-      nota: notaJustificacion.trim()
+      nota: notaJustificacion.trim(),
+      fechaCreacion,
     });
+    setGuardandoJustif(false);
+
+    if (!ok) {
+      setJustifError('No se pudo guardar la justificación en Supabase. Verifica tu conexión e intenta de nuevo.');
+      return;
+    }
+
     setJustificacionesVersion(v => v + 1);
     setModalJustificarOpen(false);
     setNotaJustificacion('');
@@ -375,15 +407,25 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
         auxiliar: currentAuxiliar,
         fecha: prev.fechaStr,
         tipo: tipoJustificacionSelect,
-        nota: notaJustificacion.trim()
+        nota: notaJustificacion.trim(),
+        fechaCreacion,
       }
     } : null);
   };
 
-  // Eliminar Justificación
-  const handleEliminarJustificacion = () => {
-    if (!selectedDiaData) return;
-    eliminarJustificacionStorage(currentAuxiliar, selectedDiaData.fechaStr);
+  // Eliminar Justificación en Supabase
+  const handleEliminarJustificacion = async () => {
+    if (!selectedDiaData || guardandoJustif) return;
+    setJustifError('');
+    setGuardandoJustif(true);
+    const ok = await eliminarJustificacionStorage(currentAuxiliar, selectedDiaData.fechaStr);
+    setGuardandoJustif(false);
+
+    if (!ok) {
+      setJustifError('No se pudo eliminar la justificación en Supabase. Verifica tu conexión e intenta de nuevo.');
+      return;
+    }
+
     setJustificacionesVersion(v => v + 1);
     setSelectedDiaData(prev => prev ? { ...prev, justificacion: undefined } : null);
   };
@@ -424,7 +466,11 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
     setGuardandoRegistro(true);
     try {
       if (onAgregarRegistro) {
-        await onAgregarRegistro(nuevoReg);
+        const result = await onAgregarRegistro(nuevoReg);
+        if (result === false) {
+          setRegError('No se pudo guardar el turno en Supabase. Revisa tu conexión o si el turno ya existe.');
+          return;
+        }
       }
       setModalRegistrarOpen(false);
       setSelectedDiaData(null);
@@ -1248,22 +1294,32 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
                     )}
                   </div>
 
+                  {justifError && (
+                    <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 p-2.5 rounded-xl flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                      <span>{justifError}</span>
+                    </div>
+                  )}
+
                   <div className="pt-2 flex gap-2">
                     <button
                       onClick={() => {
+                        setJustifError('');
                         setTipoJustificacionSelect(selectedDiaData.justificacion?.tipo || 'descanso');
                         setNotaJustificacion(selectedDiaData.justificacion?.nota || '');
                         setModalJustificarOpen(true);
                       }}
-                      className="flex-1 py-2.5 bg-amber-600 text-white rounded-xl text-xs font-bold hover:bg-amber-700"
+                      disabled={guardandoJustif}
+                      className="flex-1 py-2.5 bg-amber-600 text-white rounded-xl text-xs font-bold hover:bg-amber-700 disabled:opacity-50"
                     >
                       Modificar Justificación
                     </button>
                     <button
                       onClick={handleEliminarJustificacion}
-                      className="px-3 py-2.5 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold hover:bg-rose-100"
+                      disabled={guardandoJustif}
+                      className="px-3 py-2.5 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold hover:bg-rose-100 disabled:opacity-50"
                     >
-                      Eliminar
+                      {guardandoJustif ? 'Eliminando...' : 'Eliminar'}
                     </button>
                   </div>
                 </div>
@@ -1383,16 +1439,28 @@ export const DetalleAuxiliarView: React.FC<DetalleAuxiliarViewProps> = ({
                   />
                 </div>
 
+                {justifError && (
+                  <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 p-2.5 rounded-xl flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                    <span>{justifError}</span>
+                  </div>
+                )}
+
                 <div className="pt-3 flex gap-2">
                   <button
                     onClick={handleGuardarJustificacion}
-                    className="flex-1 py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-colors"
+                    disabled={guardandoJustif}
+                    className="flex-1 py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-colors disabled:opacity-50 cursor-pointer"
                   >
-                    Guardar Justificación
+                    {guardandoJustif ? 'Guardando...' : 'Guardar Justificación'}
                   </button>
                   <button
-                    onClick={() => setModalJustificarOpen(false)}
-                    className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-200"
+                    onClick={() => {
+                      setJustifError('');
+                      setModalJustificarOpen(false);
+                    }}
+                    disabled={guardandoJustif}
+                    className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-200 disabled:opacity-50"
                   >
                     Cancelar
                   </button>

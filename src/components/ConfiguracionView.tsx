@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Settings,
   Sliders,
@@ -9,18 +9,19 @@ import {
   CheckCircle2,
   AlertCircle,
   RefreshCw,
-  Clock,
-  Sparkles
 } from 'lucide-react';
 import { AlertsConfig } from './AlertsConfig';
 import { safeLocalStorage } from '../utils';
+import { guardarAppConfig } from '../supabase';
 
 interface ConfiguracionViewProps {
   adminPin: string;
-  onUpdateAdminPin: (newPin: string) => void;
+  onUpdateAdminPin: (newPin: string) => Promise<boolean | void> | void;
   isOnline: boolean;
   onVerificarConexion: () => Promise<boolean>;
   totalRegistrosCount: number;
+  appConfig?: Record<string, string>;
+  onSaveAppConfig?: (entries: Record<string, string>) => Promise<boolean>;
 }
 
 export const ConfiguracionView: React.FC<ConfiguracionViewProps> = ({
@@ -29,36 +30,79 @@ export const ConfiguracionView: React.FC<ConfiguracionViewProps> = ({
   isOnline,
   onVerificarConexion,
   totalRegistrosCount,
+  appConfig,
+  onSaveAppConfig,
 }) => {
   const [subTab, setSubTab] = useState<'parametros' | 'integraciones' | 'seguridad'>('parametros');
 
   // Parámetros laborales
   const [jornadaBase, setJornadaBase] = useState<number>(() => {
-    return Number(safeLocalStorage.getItem('ferricar_jornada_base') || '7');
+    return Number(appConfig?.jornada_base || safeLocalStorage.getItem('ferricar_jornada_base') || '7');
   });
   const [umbralFatiga, setUmbralFatiga] = useState<number>(() => {
-    return Number(safeLocalStorage.getItem('ferricar_overtime_threshold') || '10');
+    return Number(appConfig?.overtime_threshold || safeLocalStorage.getItem('ferricar_overtime_threshold') || '10');
   });
   const [paramSaved, setParamSaved] = useState(false);
+  const [paramError, setParamError] = useState('');
+  const [savingParams, setSavingParams] = useState(false);
+
+  // Sincronizar con la configuración cargada desde Supabase
+  useEffect(() => {
+    if (!appConfig) return;
+    if (appConfig.jornada_base !== undefined) {
+      const j = Number(appConfig.jornada_base);
+      if (Number.isFinite(j) && j > 0) setJornadaBase(j);
+    }
+    if (appConfig.overtime_threshold !== undefined) {
+      const u = Number(appConfig.overtime_threshold);
+      if (Number.isFinite(u) && u > 0) setUmbralFatiga(u);
+    }
+  }, [appConfig]);
 
   // Cambio de PIN de Admin
   const [nuevoPinAdmin, setNuevoPinAdmin] = useState('');
   const [pinAdminError, setPinAdminError] = useState('');
   const [pinAdminSuccess, setPinAdminSuccess] = useState(false);
+  const [savingPin, setSavingPin] = useState(false);
 
   // Verificación de conexión
   const [verificando, setVerificando] = useState(false);
   const [resultadoVerif, setResultadoVerif] = useState<string | null>(null);
 
-  const guardarParametros = (e: React.FormEvent) => {
+  const guardarParametros = async (e: React.FormEvent) => {
     e.preventDefault();
-    safeLocalStorage.setItem('ferricar_jornada_base', String(jornadaBase));
-    safeLocalStorage.setItem('ferricar_overtime_threshold', String(umbralFatiga));
+    setParamError('');
+    setParamSaved(false);
+    setSavingParams(true);
+
+    const payload = {
+      jornada_base: String(jornadaBase),
+      overtime_threshold: String(umbralFatiga),
+    };
+
+    let ok = false;
+    if (onSaveAppConfig) {
+      ok = await onSaveAppConfig(payload);
+    } else {
+      ok = await guardarAppConfig(payload);
+      if (ok) {
+        safeLocalStorage.setItem('ferricar_jornada_base', payload.jornada_base);
+        safeLocalStorage.setItem('ferricar_overtime_threshold', payload.overtime_threshold);
+      }
+    }
+
+    setSavingParams(false);
+
+    if (!ok) {
+      setParamError('Error al guardar los parámetros en Supabase. Verifica tu conexión e inténtalo de nuevo.');
+      return;
+    }
+
     setParamSaved(true);
     setTimeout(() => setParamSaved(false), 3000);
   };
 
-  const guardarPinAdmin = (e: React.FormEvent) => {
+  const guardarPinAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     setPinAdminError('');
     setPinAdminSuccess(false);
@@ -68,7 +112,15 @@ export const ConfiguracionView: React.FC<ConfiguracionViewProps> = ({
       return;
     }
 
-    onUpdateAdminPin(nuevoPinAdmin.trim());
+    setSavingPin(true);
+    const res = await onUpdateAdminPin(nuevoPinAdmin.trim());
+    setSavingPin(false);
+
+    if (res === false) {
+      setPinAdminError('No se pudo actualizar el PIN del Administrador en Supabase.');
+      return;
+    }
+
     setNuevoPinAdmin('');
     setPinAdminSuccess(true);
     setTimeout(() => setPinAdminSuccess(false), 3000);
@@ -192,18 +244,26 @@ export const ConfiguracionView: React.FC<ConfiguracionViewProps> = ({
               </div>
             </div>
 
+            {paramError && (
+              <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 p-3 rounded-xl flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{paramError}</span>
+              </div>
+            )}
+
             {paramSaved && (
               <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 p-3 rounded-xl flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>Parámetros guardados y aplicados a los cálculos del sistema.</span>
+                <span>Parámetros guardados en la nube y aplicados a los cálculos del sistema.</span>
               </div>
             )}
 
             <button
               type="submit"
-              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs cursor-pointer"
+              disabled={savingParams}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs cursor-pointer"
             >
-              Guardar Parámetros
+              {savingParams ? 'Guardando en Supabase...' : 'Guardar Parámetros'}
             </button>
           </form>
         </div>
@@ -220,7 +280,7 @@ export const ConfiguracionView: React.FC<ConfiguracionViewProps> = ({
             </p>
           </div>
 
-          <AlertsConfig />
+          <AlertsConfig appConfig={appConfig} onSaveAppConfig={onSaveAppConfig} />
         </div>
       )}
 
@@ -270,9 +330,10 @@ export const ConfiguracionView: React.FC<ConfiguracionViewProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold cursor-pointer shadow-xs"
+                disabled={savingPin}
+                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer shadow-xs"
               >
-                Actualizar PIN de Administrador
+                {savingPin ? 'Guardando...' : 'Actualizar PIN de Administrador'}
               </button>
             </form>
           </div>

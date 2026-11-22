@@ -121,6 +121,7 @@ export const HoursRegister: React.FC<HoursRegisterProps> = ({
         try {
           const d1 = parseFecha(reg.fecha);
           const d2 = parseFecha(formattedFecha);
+          if (!d1 || !d2) return reg.fecha === formattedFecha;
           return d1.getDate() === d2.getDate() &&
                  d1.getMonth() === d2.getMonth() &&
                  d1.getFullYear() === d2.getFullYear();
@@ -371,13 +372,13 @@ export const HoursRegister: React.FC<HoursRegisterProps> = ({
           </div>
         </div>
 
-        {/* 2. ETIQUETA "NOCTURNO" EN DETECCIÓN INMEDIATA (night-indigo) */}
+        {/* 2. ETIQUETA "CRUZA MEDIANOCHE" EN DETECCIÓN INMEDIATA (night-indigo) */}
         {previewEsNocturno && !aunEnTurno && (
           <div className="bg-night-indigo-soft border border-night-indigo/10 p-2.5 rounded-lg text-night-indigo text-[10px] leading-relaxed flex items-start gap-2 animate-fade-in shadow-inner">
             <span className="text-sm shrink-0">🌙</span>
             <div>
-              <span className="font-bold uppercase tracking-wider block text-night-indigo">Turno Nocturno Detectado</span>
-              <span className="text-graphite-700 block mt-0.5 font-medium">La jornada cruza la medianoche y califica automáticamente para recargos nocturnos.</span>
+              <span className="font-bold uppercase tracking-wider block text-night-indigo">Cruza medianoche</span>
+              <span className="text-graphite-700 block mt-0.5 font-medium">La hora de salida es anterior a la de ingreso; la jornada cruza medianoche.</span>
             </div>
           </div>
         )}

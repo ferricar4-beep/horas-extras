@@ -4,36 +4,81 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Bell, ShieldAlert, Send, CheckCircle2, Play, ExternalLink } from 'lucide-react';
+import { Bell, ShieldAlert, Send, CheckCircle2, Play, Save } from 'lucide-react';
 import { safeLocalStorage } from '../utils';
+import { guardarAppConfig } from '../supabase';
 
-export const AlertsConfig: React.FC = () => {
+interface AlertsConfigProps {
+  appConfig?: Record<string, string>;
+  onSaveAppConfig?: (entries: Record<string, string>) => Promise<boolean>;
+}
+
+export const AlertsConfig: React.FC<AlertsConfigProps> = ({
+  appConfig,
+  onSaveAppConfig,
+}) => {
   const [webhookUrl, setWebhookUrl] = useState<string>(() => {
-    return safeLocalStorage.getItem('ferricar_webhook_url') || 'https://n8n.ferricar.com.co/webhook-test/67f7da3c-1a22-44f2-9ad2-921d26c59b2d';
+    return appConfig?.webhook_url || safeLocalStorage.getItem('ferricar_webhook_url') || 'https://n8n.ferricar.com.co/webhook-test/67f7da3c-1a22-44f2-9ad2-921d26c59b2d';
   });
 
   const [thresholdHours, setThresholdHours] = useState<number>(() => {
-    return Number(safeLocalStorage.getItem('ferricar_overtime_threshold') || '10');
+    return Number(appConfig?.overtime_threshold || safeLocalStorage.getItem('ferricar_overtime_threshold') || '10');
   });
 
   const [notifEmail, setNotifEmail] = useState<string>(() => {
-    return safeLocalStorage.getItem('ferricar_notif_email') || 'juan.ruiz@mct.com.co';
+    return appConfig?.notif_email || safeLocalStorage.getItem('ferricar_notif_email') || 'juan.ruiz@mct.com.co';
   });
 
   const [testStatus, setTestStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [testResultMsg, setTestResultMsg] = useState<string>('');
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [saveMsg, setSaveMsg] = useState<string>('');
 
   useEffect(() => {
-    safeLocalStorage.setItem('ferricar_webhook_url', webhookUrl);
-  }, [webhookUrl]);
+    if (!appConfig) return;
+    if (appConfig.webhook_url !== undefined) setWebhookUrl(appConfig.webhook_url);
+    if (appConfig.overtime_threshold !== undefined) {
+      const n = Number(appConfig.overtime_threshold);
+      if (Number.isFinite(n)) setThresholdHours(n);
+    }
+    if (appConfig.notif_email !== undefined) setNotifEmail(appConfig.notif_email);
+  }, [appConfig]);
 
-  useEffect(() => {
-    safeLocalStorage.setItem('ferricar_overtime_threshold', String(thresholdHours));
-  }, [thresholdHours]);
+  const handleSaveIntegracion = async () => {
+    setSavingConfig(true);
+    setSaveStatus('idle');
+    setSaveMsg('');
 
-  useEffect(() => {
-    safeLocalStorage.setItem('ferricar_notif_email', notifEmail);
-  }, [notifEmail]);
+    const payload = {
+      webhook_url: webhookUrl.trim(),
+      overtime_threshold: String(thresholdHours),
+      notif_email: notifEmail.trim(),
+    };
+
+    let ok = false;
+    if (onSaveAppConfig) {
+      ok = await onSaveAppConfig(payload);
+    } else {
+      ok = await guardarAppConfig(payload);
+      if (ok) {
+        safeLocalStorage.setItem('ferricar_webhook_url', payload.webhook_url);
+        safeLocalStorage.setItem('ferricar_overtime_threshold', payload.overtime_threshold);
+        safeLocalStorage.setItem('ferricar_notif_email', payload.notif_email);
+      }
+    }
+
+    setSavingConfig(false);
+    if (!ok) {
+      setSaveStatus('error');
+      setSaveMsg('No se pudo guardar la configuración en Supabase. Verifica tu conexión e intenta de nuevo.');
+      return;
+    }
+
+    setSaveStatus('success');
+    setSaveMsg('Configuración de alertas guardada en la nube correctamente.');
+    setTimeout(() => setSaveStatus('idle'), 3500);
+  };
 
   const probarWebhook = async () => {
     if (!webhookUrl) {
@@ -192,17 +237,45 @@ export const AlertsConfig: React.FC = () => {
                   Haz clic en el botón de abajo para lanzar un payload JSON de prueba. Esto validará si tu webhook está activo y listo para procesar datos de recargos.
                 </p>
 
-                <button
-                  onClick={probarWebhook}
-                  disabled={testStatus === 'loading'}
-                  className="flex items-center gap-1.5 bg-brand-red hover:bg-brand-red-hover text-white font-medium text-xs px-3 py-1.5 rounded-md cursor-pointer transition-colors"
-                >
-                  <Play className="w-3 h-3 fill-white" />
-                  {testStatus === 'loading' ? 'Transmitiendo...' : 'Enviar Alerta de Prueba'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSaveIntegracion}
+                    disabled={savingConfig}
+                    className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium text-xs px-3.5 py-1.5 rounded-md cursor-pointer transition-colors"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    {savingConfig ? 'Guardando...' : 'Guardar Configuración'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={probarWebhook}
+                    disabled={testStatus === 'loading'}
+                    className="flex items-center gap-1.5 bg-brand-red hover:bg-brand-red-hover text-white font-medium text-xs px-3 py-1.5 rounded-md cursor-pointer transition-colors"
+                  >
+                    <Play className="w-3 h-3 fill-white" />
+                    {testStatus === 'loading' ? 'Transmitiendo...' : 'Enviar Alerta de Prueba'}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+
+          {saveStatus !== 'idle' && (
+            <div className={`mt-4 p-3 rounded-lg flex items-start gap-2.5 text-xs ${
+              saveStatus === 'success'
+                ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                : 'bg-rose-50 border border-rose-200 text-rose-800'
+            }`}>
+              {saveStatus === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+              ) : (
+                <ShieldAlert className="w-4 h-4 shrink-0 text-rose-600" />
+              )}
+              <span>{saveMsg}</span>
+            </div>
+          )}
         </div>
 
         {/* Estado del test */}

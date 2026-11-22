@@ -36,10 +36,10 @@ interface AuxiliaresViewProps {
   statsAuxiliares: AuxiliarStats[];
   allRegistros?: Registro[];
   registros?: Registro[];
-  onUpdatePin: (auxiliar: string, newPin: string) => void;
-  onUpdateCargo: (auxiliar: string, newCargo: string) => void;
-  onCreateAuxiliar: (nombre: string, pin: string, cargo: string) => void;
-  onDeleteAuxiliar?: (auxiliar: string) => void;
+  onUpdatePin: (auxiliar: string, newPin: string) => Promise<boolean | void> | void;
+  onUpdateCargo: (auxiliar: string, newCargo: string) => Promise<boolean | void> | void;
+  onCreateAuxiliar: (nombre: string, pin: string, cargo: string) => Promise<boolean | void> | void;
+  onDeleteAuxiliar?: (auxiliar: string) => Promise<boolean | void> | void;
   onViewAuxiliarJornadas?: (auxiliarName: string) => void;
   onEditarRegistro?: (reg: Registro) => void;
   onEliminarRegistro?: (id: string, auxiliar: string, fecha: string) => void;
@@ -101,7 +101,7 @@ export const AuxiliaresView: React.FC<AuxiliaresViewProps> = ({
   };
 
   // Crear auxiliar
-  const handleCreateSubmit = (e: React.FormEvent) => {
+  const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreateError('');
     const cleanNombre = newNombre.trim().toUpperCase();
@@ -120,7 +120,11 @@ export const AuxiliaresView: React.FC<AuxiliaresViewProps> = ({
       return;
     }
 
-    onCreateAuxiliar(cleanNombre, cleanPin, newCargo);
+    const res = await onCreateAuxiliar(cleanNombre, cleanPin, newCargo);
+    if (res === false) {
+      setCreateError('No se pudo guardar el auxiliar en Supabase. Verifica tu conexión e inténtalo de nuevo.');
+      return;
+    }
     setIsCreateModalOpen(false);
     setNewNombre('');
     setNewPin('');
@@ -137,17 +141,35 @@ export const AuxiliaresView: React.FC<AuxiliaresViewProps> = ({
   };
 
   // Guardar edición
-  const handleEditSubmit = (e: React.FormEvent) => {
+  const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingAux) return;
+    setEditError('');
     const cleanPin = editPin.trim();
     if (!/^\d{4}$/.test(cleanPin)) {
       setEditError('El PIN debe tener exactamente 4 números.');
       return;
     }
 
-    onUpdatePin(editingAux, cleanPin);
-    onUpdateCargo(editingAux, editCargo);
+    const originalPin = pinsMap[editingAux] || '1234';
+    const originalCargo = (auxiliarCargos[editingAux] as CargoTipo) || 'auxiliar_carga';
+
+    if (cleanPin !== originalPin) {
+      const pinRes = await onUpdatePin(editingAux, cleanPin);
+      if (pinRes === false) {
+        setEditError('No se pudo guardar el PIN en Supabase. Verifica tu conexión e intenta de nuevo.');
+        return;
+      }
+    }
+
+    if (editCargo !== originalCargo || cleanPin === originalPin) {
+      const cargoRes = await onUpdateCargo(editingAux, editCargo);
+      if (cargoRes === false) {
+        setEditError('No se pudo guardar el cargo en Supabase. Verifica tu conexión e intenta de nuevo.');
+        return;
+      }
+    }
+
     setEditingAux(null);
   };
 
